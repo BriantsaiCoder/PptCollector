@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PptCollector</title>
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-mark" aria-hidden="true"><span></span></div>
+    <div>
+      <h1>PptCollector</h1>
+      <p>投影片搜尋與合併</p>
+    </div>
+    <span class="format">PowerPoint · .pptx</span>
+  </header>
+
+  <main class="workspace">
+    <section class="settings panel" aria-labelledby="search-title">
+      <h2 id="search-title">搜尋設定</h2>
+      <form id="search-form">
+        <div class="search-fields">
+        <div class="field">
+          <label for="choose">搜尋資料夾</label>
+          <div class="folder-field">
+            <span id="folder" class="path">尚未選擇資料夾</span>
+            <button id="choose" type="button" class="secondary">選擇…</button>
+          </div>
+          <p class="hint">包含子資料夾中的 .pptx 檔。</p>
+        </div>
+        <div class="field">
+          <label for="term">關鍵字</label>
+          <div class="input-action">
+            <input id="term" type="text" autocomplete="off" placeholder="例如：良率" aria-describedby="term-hint" maxlength="200">
+            <button id="add" type="button" class="secondary">加入</button>
+          </div>
+          <p class="hint" id="term-hint">按 Enter 加入。英文不分大小寫。</p>
+          <ul class="chips" id="chips" aria-label="已加入的關鍵字"></ul>
+        </div>
+        </div>
+        <fieldset class="field mode-field">
+          <legend>比對方式</legend>
+          <div class="segments">
+            <label><input type="radio" name="mode" value="any" checked><span>任一符合</span></label>
+            <label><input type="radio" name="mode" value="all"><span>全部符合</span></label>
+          </div>
+          <p id="mode-hint" class="hint">投影片包含任一關鍵字即列入結果。</p>
+        </fieldset>
+        <div class="search-actions">
+          <button class="primary full-width" id="search" type="submit">搜尋投影片</button>
+          <button class="secondary full-width" id="cancel" type="button" hidden>取消搜尋</button>
+        </div>
+      </form>
+      <div id="progress-box" class="progress-box" hidden>
+        <progress id="progress" aria-label="搜尋進度"></progress>
+        <p id="progress-label" class="hint">正在讀取資料夾…</p>
+      </div>
+    </section>
+
+    <section class="results panel" aria-labelledby="results-title">
+      <div class="results-head">
+        <div><h2 id="results-title">搜尋結果</h2><p class="hint" id="result-summary">可在匯出前勾選要保留的投影片。</p></div>
+        <button id="toggle" class="secondary" type="button" hidden>取消全選</button>
+      </div>
+      <p id="status" class="notice" role="status" aria-live="polite" hidden></p>
+      <details id="issues" class="issues" hidden>
+        <summary id="issue-summary"></summary>
+        <ul id="issue-list"></ul>
+      </details>
+      <div id="size-panel" class="size-panel" hidden>
+        <label for="size-select">依尺寸勾選</label>
+        <select id="size-select"><option value="">選擇相同尺寸</option></select>
+      </div>
+      <div id="empty" class="empty">
+        <div class="empty-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p id="empty-title">先選資料夾，再輸入關鍵字</p>
+        <p class="hint" id="empty-hint">命中的投影片會顯示來源、頁碼及文字片段。</p>
+      </div>
+      <div class="table-wrap" id="table-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col"><span class="sr-only">選取</span></th><th scope="col">來源簡報</th><th scope="col">頁次</th><th scope="col">命中內容</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <nav id="pages" class="page-controls" aria-label="搜尋結果頁碼" hidden>
+        <button class="secondary" id="previous" type="button">上一頁</button>
+        <span id="page-label"></span>
+        <button class="secondary" id="next" type="button">下一頁</button>
+      </nav>
+    </section>
+  </main>
+
+  <section class="export-bar" aria-labelledby="export-title">
+    <form id="export-form">
+      <div class="export-description"><h2 id="export-title">匯出簡報</h2><p class="hint" id="selection">尚未選取投影片</p></div>
+      <div class="output-field">
+        <label for="name">檔案名稱</label>
+        <div class="suffix-field"><input id="name" autocomplete="off" value="搜尋結果" maxlength="245" required><span>.pptx</span></div>
+      </div>
+      <div class="export-actions">
+        <button id="export" type="submit" class="primary" disabled>匯出 .pptx</button>
+        <button id="open" type="button" class="secondary" hidden>開啟輸出資料夾</button>
+      </div>
+      <p id="output-path" class="hint" tabindex="0">存回所選資料夾</p>
+    </form>
+  </section>
+</body>
+</html>

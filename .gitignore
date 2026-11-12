@@ -1,0 +1,13 @@
+/artifacts/
+/target/
+/engine/publish/
+/engine/publish-*/
+/gen/schemas/
+/node_modules/
+/tests/
+**/bin/
+**/obj/
+__pycache__/
+.DS_Store
+*.textClipping
+!/icons/

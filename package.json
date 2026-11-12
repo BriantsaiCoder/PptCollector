@@ -1,0 +1,12 @@
+{
+  "name": "ppt-collector-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "engine": "node scripts/build-engine.mjs",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}
