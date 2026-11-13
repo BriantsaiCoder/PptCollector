@@ -1,0 +1,72 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS ARM64
+            runner: macos-15
+            bundle: app
+          - platform: Windows x64
+            runner: windows-2025
+            bundle: nsis
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Check source formatting and JavaScript syntax
+        run: |
+          cargo +stable fmt --check
+          node --check web/app.js
+          node --check scripts/build-engine.mjs
+      - name: Build desktop bundle
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          npm ci
+          npm run build -- --ci --bundles ${{ matrix.bundle }} -- --locked
+      - name: Check bundle and run the native engine
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            $installer = Get-ChildItem 'target/release/bundle/nsis/*-setup.exe' -File -ErrorAction Stop
+            if (@($installer).Count -ne 1) { throw 'Expected one Windows installer.' }
+            $engine = './engine/publish/PptCollector.Engine.exe'
+          } else {
+            $engine = './target/release/bundle/macos/PptCollector.app/Contents/Resources/engine/PptCollector.Engine'
+          }
+          $reply = '{"kind":"ci-smoke"}' | & $engine
+          if ($LASTEXITCODE -ne 0 -or ($reply | ConvertFrom-Json).error -ne '不支援的操作。') {
+            throw "Engine smoke check failed: $engine"
+          }
