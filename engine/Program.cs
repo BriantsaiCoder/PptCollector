@@ -98,6 +98,7 @@ static object Export(ExportRequest request)
         uint slideId = 256, layoutId = 0x80000000;
         var registeredLayouts = new HashSet<Uri>();
         var textDefaults = new List<(SlideMasterPart Part, DefaultTextStyle? Style, double Scale)>();
+        var slideDefaults = new List<(SlidePart Part, DefaultTextStyle? Style, double Scale)>();
         var tableStyles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var embeddedFonts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var registeredMasters = new HashSet<Uri>();
@@ -109,7 +110,8 @@ static object Export(ExportRequest request)
             using var stream = ReadSource(file.Path);
             if (Fingerprint(stream) != file.Digest)
                 throw new InvalidDataException($"{file.Label} 已變更，請重新搜尋。");
-            using (var input = PresentationDocument.Open(stream, false))
+            using var clean = PrepareSource(stream, file.Pages);
+            using (var input = PresentationDocument.Open(clean ?? stream, false))
             {
                 var origin = ReadPresentation(input);
                 var size = ReadSize(origin);
@@ -136,8 +138,6 @@ static object Export(ExportRequest request)
                 foreach (var page in file.Pages)
                 {
                     var original = sourceSlides[page - 1];
-                    if (original.Parts.Any(relation => relation.OpenXmlPart is SlidePart))
-                        throw new InvalidDataException($"{file.Label} 第 {page} 頁有連往其他投影片的連結，無法確認合併後的連結。");
                     var copy = destination.AddPart(original);
                     var layoutPart = copy.SlideLayoutPart;
                     var master = layoutPart?.SlideMasterPart ??
@@ -147,7 +147,7 @@ static object Export(ExportRequest request)
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         if (resize)
                             FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize);
-                        UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, sourceTableStyles?.Default?.Value, styleIds);
+                        UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
                         foreach (var layout in master.SlideMaster.SlideLayoutIdList!.Elements<SlideLayoutId>())
@@ -159,14 +159,19 @@ static object Export(ExportRequest request)
                         var layoutTree = layoutPart.SlideLayout.CommonSlideData?.ShapeTree;
                         if (resize)
                             FitCanvas(layoutTree, size, targetSize);
-                        UpdateTableStyleReferences(layoutTree, sourceTableStyles?.Default?.Value, styleIds);
+                        UpdateTableStyleReferences(layoutTree, styleIds);
                         layoutPart.SlideLayout.Save();
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
+                    {
                         FitCanvas(tree, size, targetSize);
-                    UpdateTableStyleReferences(tree, sourceTableStyles?.Default?.Value, styleIds);
+                        if (copy.Slide.CommonSlideData is not null)
+                            FitBackground(copy, layoutPart!, master, size, targetSize);
+                    }
+                    UpdateTableStyleReferences(tree, styleIds);
                     copy.Slide.Save();
+                    slideDefaults.Add((copy, origin.Presentation.DefaultTextStyle, scale));
                     if (copy.NotesSlidePart is { NotesMasterPart: { } copiedMaster } notes)
                     {
                         if (notesMaster is null)
@@ -201,10 +206,28 @@ static object Export(ExportRequest request)
         {
             foreach (var (part, style, scale) in textDefaults)
             {
-                ApplyTextDefaults(part.SlideMaster, style);
                 if (scale != 1 && part.SlideMaster.TextStyles is { } styles)
                     ScaleText(styles, scale);
+                ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale));
                 part.SlideMaster.Save();
+            }
+            foreach (var (part, style, scale) in slideDefaults)
+            {
+                if (style is null)
+                    continue;
+                var scaled = ScaledDefaults(style, scale)!;
+                var tree = part.Slide.CommonSlideData?.ShapeTree;
+                if (tree is null)
+                    continue;
+                foreach (var shape in tree.Descendants<Shape>().Where(shape =>
+                    shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is null))
+                {
+                    if (shape.TextBody is not { } body)
+                        continue;
+                    body.ListStyle ??= new Drawing.ListStyle();
+                    MergeTextProperties(body.ListStyle, scaled);
+                }
+                part.Slide.Save();
             }
         }
         else
@@ -221,6 +244,89 @@ static object Export(ExportRequest request)
         throw new InvalidDataException($"輸出檔未通過 PowerPoint 結構檢查。{invalid.Part?.Uri}：{invalid.Description}");
     return new { count = request.Files.Sum(file => file.Pages.Length) };
 }
+
+static FileStream? PrepareSource(FileStream source, int[] pages)
+{
+    // Remove navigation before AddPart: a slide-to-slide relationship would copy an unselected target.
+    using (var input = PresentationDocument.Open(source, false))
+        if (!NavigationParts(ReadPresentation(input), pages).Any(part => SlideLinks(part).Any() || JumpActions(part).Any()))
+            return null;
+
+    var path = Path.Combine(Path.GetTempPath(), $"pptcollector-{Guid.NewGuid():N}.tmp");
+    var copy = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+        81920, FileOptions.DeleteOnClose);
+    try
+    {
+        source.Position = 0;
+        source.CopyTo(copy);
+        copy.Position = 0;
+        using (var editable = PresentationDocument.Open(copy, true))
+        {
+            foreach (var part in NavigationParts(ReadPresentation(editable), pages).ToArray())
+            {
+                var links = SlideLinks(part).ToArray();
+                var ids = links.Select(link => link.RelationshipId).ToHashSet(StringComparer.Ordinal);
+                var root = part.RootElement!;
+                foreach (var action in JumpActions(part).Concat(root.Descendants().Where(element =>
+                    element.LocalName is "hlinkClick" or "hlinkHover" or "hlinkMouseOver" &&
+                    element.GetAttributes().Any(attr => attr.LocalName == "id" &&
+                        attr.NamespaceUri == "http://schemas.openxmlformats.org/officeDocument/2006/relationships" &&
+                        attr.Value is { } id && ids.Contains(id)))).Distinct().ToArray())
+                    action.Remove();
+                foreach (var link in links)
+                    part.DeletePart(link.RelationshipId);
+                root.Save();
+            }
+        }
+        copy.Position = 0;
+        return copy;
+    }
+    catch
+    {
+        copy.Dispose();
+        throw;
+    }
+    finally
+    {
+        source.Position = 0;
+    }
+}
+
+static IEnumerable<OpenXmlPart> NavigationParts(PresentationPart source, int[] pages)
+{
+    var slides = SlidesInOrder(source);
+    var parts = new HashSet<OpenXmlPart>();
+    foreach (var page in pages)
+    {
+        var slide = slides[page - 1];
+        parts.Add(slide);
+        if (slide.SlideLayoutPart is { } layout)
+        {
+            parts.Add(layout);
+            if (layout.SlideMasterPart is { } master && parts.Add(master))
+                parts.UnionWith(master.SlideLayoutParts);
+        }
+        if (slide.NotesSlidePart is { } notes)
+            parts.Add(notes);
+    }
+    return parts;
+}
+
+static IEnumerable<IdPartPair> SlideLinks(OpenXmlPart part) =>
+    part is NotesSlidePart ? [] : part.Parts.Where(link => link.OpenXmlPart is SlidePart);
+
+static IEnumerable<OpenXmlElement> JumpActions(OpenXmlPart part) =>
+    (part.RootElement?.Descendants() ?? []).Where(element =>
+    {
+        if (element.LocalName is not ("hlinkClick" or "hlinkHover" or "hlinkMouseOver"))
+            return false;
+        var action = element.GetAttributes().FirstOrDefault(attribute => attribute.LocalName == "action").Value;
+        return action is not null && (
+            action.Equals("ppaction://hlinksldjump", StringComparison.OrdinalIgnoreCase) ||
+            action.StartsWith("ppaction://hlinkpres?slideindex=", StringComparison.OrdinalIgnoreCase) ||
+            (action.StartsWith("ppaction://hlinkshowjump?jump=", StringComparison.OrdinalIgnoreCase) &&
+                !action.EndsWith("=endshow", StringComparison.OrdinalIgnoreCase)));
+    });
 
 static string? FormatKey(OpenXmlElement? value)
 {
@@ -246,6 +352,15 @@ static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults)
         MergeTextProperties(style, defaults);
 }
 
+static DefaultTextStyle? ScaledDefaults(DefaultTextStyle? source, double scale)
+{
+    if (source is null || scale == 1)
+        return source;
+    var clone = (DefaultTextStyle)source.CloneNode(true);
+    ScaleText(clone, scale);
+    return clone;
+}
+
 static void MergeTextProperties(OpenXmlCompositeElement target, OpenXmlCompositeElement fallback)
 {
     var attrs = target.GetAttributes();
@@ -254,13 +369,34 @@ static void MergeTextProperties(OpenXmlCompositeElement target, OpenXmlComposite
             target.SetAttribute(attribute);
     foreach (var property in fallback.ChildElements)
     {
-        var existing = target.ChildElements.FirstOrDefault(child => child.GetType() == property.GetType());
-        if (existing is OpenXmlCompositeElement nested && property is OpenXmlCompositeElement inherited)
+        var choice = TextPropertyChoice(property.LocalName);
+        var existing = target.ChildElements.FirstOrDefault(child =>
+            child.GetType() == property.GetType() || (choice != null && choice == TextPropertyChoice(child.LocalName)));
+        if (existing?.GetType() == property.GetType() &&
+            existing is OpenXmlCompositeElement nested && property is OpenXmlCompositeElement inherited &&
+            choice is null)
             MergeTextProperties(nested, inherited);
         else if (existing is null)
-            target.AddChild(property.CloneNode(true), false);
+        {
+            if (!target.AddChild(property.CloneNode(true), false))
+                throw new InvalidDataException($"無法保留預設文字樣式：{property.LocalName}。");
+        }
     }
 }
+
+static string? TextPropertyChoice(string name) => name switch
+{
+    "noFill" or "solidFill" or "gradFill" or "blipFill" or "pattFill" or "grpFill" => "fill",
+    "buNone" or "buAutoNum" or "buChar" or "buBlip" => "bullet",
+    "buSzTx" or "buSzPct" or "buSzPts" => "bulletSize",
+    "buClrTx" or "buClr" => "bulletColor",
+    "buFontTx" or "buFont" => "bulletFont",
+    "effectLst" or "effectDag" => "effects",
+    "uLnTx" or "uLn" => "underlineLine",
+    "uFillTx" or "uFill" => "underlineFill",
+    "spcPct" or "spcPts" => "spacing",
+    _ => null,
+};
 
 static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source,
     PresentationPart target, Dictionary<string, string> seen)
@@ -291,24 +427,13 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
     return remap;
 }
 
-static void UpdateTableStyleReferences(ShapeTree? tree, string? defaultId, Dictionary<string, string> remap)
+static void UpdateTableStyleReferences(ShapeTree? tree, Dictionary<string, string> remap)
 {
-    if (tree is null || (defaultId is null && remap.Count == 0))
+    if (tree is null || remap.Count == 0)
         return;
-    foreach (var properties in tree.Descendants<Drawing.TableProperties>())
-    {
-        if (properties.GetFirstChild<Drawing.TableStyle>() is not null)
-            continue;
-        var reference = properties.GetFirstChild<Drawing.TableStyleId>();
-        var id = reference?.Text ?? defaultId;
-        if (id is null)
-            continue;
-        var resolved = remap.GetValueOrDefault(id, id);
-        if (reference is null)
-            properties.AddChild(new Drawing.TableStyleId { Text = resolved });
-        else
+    foreach (var reference in tree.Descendants<Drawing.TableStyleId>())
+        if (remap.TryGetValue(reference.Text, out var resolved))
             reference.Text = resolved;
-    }
 }
 
 static string NotesSignature(NotesMasterPart master)
@@ -355,14 +480,14 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
     var top = (targetHeight - Scale(height)) / 2;
 
     long Scale(long value) => (long)Math.Round(value * scale);
-    void Move(OpenXmlElement? transform)
+    void Move(OpenXmlElement? transform, long dx, long dy)
     {
         if (transform is null)
             return;
         if (transform.GetFirstChild<Drawing.Offset>() is { } offset)
         {
-            offset.X = left + Scale(offset.X!.Value);
-            offset.Y = top + Scale(offset.Y!.Value);
+            offset.X = dx + Scale(offset.X!.Value);
+            offset.Y = dy + Scale(offset.Y!.Value);
         }
         if (transform.GetFirstChild<Drawing.Extents>() is { } extents)
         {
@@ -371,31 +496,102 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
         }
     }
 
-    foreach (var shape in tree.ChildElements)
+    void FitShapes(OpenXmlCompositeElement container, long dx, long dy)
     {
-        Move(shape switch
+        foreach (var shape in container.ChildElements)
         {
-            Shape item => item.ShapeProperties?.Transform2D,
-            Picture item => item.ShapeProperties?.Transform2D,
-            ConnectionShape item => item.ShapeProperties?.Transform2D,
-            GraphicFrame item => item.Transform,
-            GroupShape item => item.GroupShapeProperties?.TransformGroup,
-            _ => null,
-        });
-        if (shape is GraphicFrame frame)
-        {
-            foreach (var column in frame.Descendants<Drawing.GridColumn>())
-                column.Width = Scale(column.Width!.Value);
-            foreach (var row in frame.Descendants<Drawing.TableRow>())
-                row.Height = Scale(row.Height!.Value);
+            if (shape is AlternateContent alternate)
+            {
+                foreach (var branch in alternate.ChildElements.OfType<OpenXmlCompositeElement>())
+                    FitShapes(branch, dx, dy);
+                continue;
+            }
+            Move(shape switch
+            {
+                Shape item => item.ShapeProperties?.Transform2D,
+                Picture item => item.ShapeProperties?.Transform2D,
+                ConnectionShape item => item.ShapeProperties?.Transform2D,
+                GraphicFrame item => item.Transform,
+                GroupShape item => item.GroupShapeProperties?.TransformGroup,
+                _ => null,
+            }, dx, dy);
+            if (shape is GraphicFrame frame)
+            {
+                foreach (var column in frame.Descendants<Drawing.GridColumn>())
+                    column.Width = Scale(column.Width!.Value);
+                foreach (var row in frame.Descendants<Drawing.TableRow>())
+                    row.Height = Scale(row.Height!.Value);
+            }
+            if (shape is GroupShape group)
+            {
+                var transform = group.GroupShapeProperties?.TransformGroup;
+                if (transform?.ChildOffset is { } offset)
+                {
+                    offset.X = Scale(offset.X!.Value);
+                    offset.Y = Scale(offset.Y!.Value);
+                }
+                if (transform?.ChildExtents is { } extents)
+                {
+                    extents.Cx = Scale(extents.Cx!.Value);
+                    extents.Cy = Scale(extents.Cy!.Value);
+                }
+                FitShapes(group, 0, 0);
+            }
         }
     }
 
+    FitShapes(tree, left, top);
     ScaleText(tree, scale);
 }
 
 static double CanvasScale(SlideSize source, SlideSize target) =>
     Math.Min((double)target.Cx!.Value / source.Cx!.Value, (double)target.Cy!.Value / source.Cy!.Value);
+
+static void FitBackground(SlidePart slide, SlideLayoutPart layout, SlideMasterPart master,
+    SlideSize source, SlideSize target)
+{
+    var slideData = slide.Slide.CommonSlideData!;
+    var background = slideData.Background;
+    OpenXmlPart owner = slide;
+    if (background is null)
+    {
+        background = layout.SlideLayout.CommonSlideData?.Background;
+        owner = layout;
+    }
+    if (background is null)
+    {
+        background = master.SlideMaster.CommonSlideData?.Background;
+        owner = master;
+    }
+    if (background?.BackgroundProperties?.GetFirstChild<Drawing.BlipFill>() is null)
+        return;
+    // Keep the fill in the background layer, behind both master and slide objects.
+    var clone = (Background)background.CloneNode(true);
+    var picture = clone.BackgroundProperties!.GetFirstChild<Drawing.BlipFill>()!;
+    if (picture.GetFirstChild<Drawing.Tile>() is not null)
+        return;
+    var stretch = picture.GetFirstChild<Drawing.Stretch>() ?? picture.AppendChild(new Drawing.Stretch());
+    var rect = stretch.GetFirstChild<Drawing.FillRectangle>() ?? stretch.AppendChild(new Drawing.FillRectangle());
+    var scale = CanvasScale(source, target);
+    var x = source.Cx!.Value * scale / target.Cx!.Value;
+    var y = source.Cy!.Value * scale / target.Cy!.Value;
+    int Inset(int? value, double ratio) => (int)Math.Round((1 - ratio) * 50000 + (value ?? 0) * ratio);
+    rect.Left = Inset(rect.Left?.Value, x);
+    rect.Right = Inset(rect.Right?.Value, x);
+    rect.Top = Inset(rect.Top?.Value, y);
+    rect.Bottom = Inset(rect.Bottom?.Value, y);
+    foreach (var blip in picture.Descendants<Drawing.Blip>())
+    {
+        if (owner != slide && blip.Embed?.Value is { } imageId)
+            blip.Embed = slide.GetIdOfPart(slide.AddPart(owner.GetPartById(imageId)));
+        if (owner != slide && blip.Link?.Value is { } linkId)
+        {
+            var link = owner.GetExternalRelationship(linkId);
+            blip.Link = slide.AddExternalRelationship(link.RelationshipType, link.Uri).Id;
+        }
+    }
+    slideData.Background = clone;
+}
 
 static void ScaleText(OpenXmlElement node, double scale)
 {
