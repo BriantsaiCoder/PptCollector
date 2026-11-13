@@ -7,6 +7,9 @@ const field = byId("term");
 const fileName = byId("name");
 const securityName = byId("security-name");
 const radios = [...document.querySelectorAll("input[name=mode]")];
+const sourceMenu = byId("source-menu");
+const sourceActions = [...sourceMenu.querySelectorAll("button")];
+let menuSource = null;
 
 function notify(text, kind = "") {
   const status = byId("status");
@@ -136,7 +139,67 @@ function addText(parent, kind, content, style) {
   return node;
 }
 
+async function openSource(revision, id, folder = false) {
+  try { await invoke("open_source", { revision, id, folder }); }
+  catch (error) { notify(errorText(error), "error"); }
+}
+
+function closeSourceMenu(restoreFocus = false) {
+  if (!menuSource) return;
+  const { trigger } = menuSource;
+  menuSource = null;
+  sourceMenu.hidden = true;
+  if (restoreFocus) trigger.focus({ preventScroll: true });
+}
+
+function showSourceMenu(revision, id, trigger, x, y) {
+  menuSource = { revision, id, trigger };
+  sourceMenu.hidden = false;
+  const { offsetWidth, offsetHeight } = sourceMenu;
+  sourceMenu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - offsetWidth - 4))}px`;
+  sourceMenu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - offsetHeight - 4))}px`;
+  sourceActions[0].focus({ preventScroll: true });
+}
+
+for (const [index, action] of sourceActions.entries()) {
+  action.addEventListener("pointermove", () => action.focus({ preventScroll: true }));
+  action.addEventListener("click", () => {
+    if (!menuSource) return;
+    const { revision, id } = menuSource;
+    closeSourceMenu(true);
+    openSource(revision, id, index === 1);
+  });
+}
+
+sourceMenu.addEventListener("keydown", event => {
+  if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Escape") event.preventDefault();
+    closeSourceMenu(true);
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    event.preventDefault();
+    const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
+    const last = event.key === "End" || (arrow && document.activeElement === sourceActions[0]);
+    sourceActions[Number(last)].focus();
+  }
+});
+sourceMenu.addEventListener("contextmenu", event => event.preventDefault());
+
+document.addEventListener("pointerdown", event => {
+  if (!menuSource || sourceMenu.contains(event.target)) return;
+  const { trigger } = menuSource;
+  closeSourceMenu();
+  requestAnimationFrame(() => {
+    if (!menuSource && document.activeElement === document.body) {
+      trigger.focus({ preventScroll: true });
+    }
+  });
+});
+byId("table-wrap").addEventListener("scroll", () => closeSourceMenu(true));
+window.addEventListener("resize", () => closeSourceMenu(true));
+window.addEventListener("blur", () => closeSourceMenu(true));
+
 function drawPage() {
+  closeSourceMenu();
   const hits = state.scan?.hits || [];
   const rowBody = byId("rows");
   rowBody.replaceChildren();
@@ -160,9 +223,20 @@ function drawPage() {
     open.title = hit.path;
     open.setAttribute("aria-label", `開啟來源簡報 ${hit.path}，命中第 ${hit.page} 頁`);
     const revision = state.scan.revision;
-    open.addEventListener("click", async () => {
-      try { await invoke("open_source", { revision, id: hit.id }); }
-      catch (error) { notify(errorText(error), "error"); }
+    open.setAttribute("aria-keyshortcuts", "Shift+F10");
+    open.addEventListener("click", () => openSource(revision, hit.id));
+    row.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      const focused = document.activeElement;
+      const trigger = row.contains(focused) ? focused : open;
+      showSourceMenu(revision, hit.id, trigger, event.clientX, event.clientY);
+    });
+    row.addEventListener("keydown", event => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      const trigger = event.target;
+      const { left, bottom } = trigger.getBoundingClientRect();
+      showSourceMenu(revision, hit.id, trigger, left, bottom);
     });
     if (pieces.length) addText(source, "span", pieces.join(" / "), "row-detail");
     row.insertCell().textContent = String(hit.page);

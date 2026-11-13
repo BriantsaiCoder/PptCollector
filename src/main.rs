@@ -4,9 +4,10 @@ mod core;
 
 use crate::core::{ExportOptions, Exported, Hit, Job, Result, Scan, display_path};
 use serde::Serialize;
+#[cfg(not(windows))]
+use std::process::Command;
 use std::{
     path::PathBuf,
-    process::Command,
     sync::{Arc, Mutex},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -199,7 +200,7 @@ async fn export(
 }
 
 #[tauri::command]
-async fn open_source(app: AppHandle, revision: u64, id: usize) -> Result<()> {
+async fn open_source(app: AppHandle, revision: u64, id: usize, folder: Option<bool>) -> Result<()> {
     let (root, scan) = {
         let state = app.state::<AppState>();
         let workspace = state.0.lock().unwrap();
@@ -214,14 +215,38 @@ async fn open_source(app: AppHandle, revision: u64, id: usize) -> Result<()> {
     };
     tauri::async_runtime::spawn_blocking(move || {
         let path = core::source_path(&root, &scan, id)?;
-        open_presentation(&path)
+        if folder == Some(true) {
+            open_source_folder(&path)
+        } else {
+            open_path(&path, "來源簡報")
+        }
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
+#[cfg(target_os = "macos")]
+fn open_source_folder(path: &std::path::Path) -> Result<()> {
+    // Reveal the file so Finder opens its parent even inside a package.
+    let status = Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("無法開啟來源資料夾：{error}"))?;
+    if !status.success() {
+        return Err("無法開啟來源資料夾。".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_source_folder(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().ok_or("找不到來源簡報所在的資料夾。")?;
+    open_path(parent, "來源資料夾")
+}
+
 #[cfg(not(windows))]
-fn open_presentation(path: &std::path::Path) -> Result<()> {
+fn open_path(path: &std::path::Path, label: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let opener = "/usr/bin/open";
     #[cfg(not(target_os = "macos"))]
@@ -229,16 +254,16 @@ fn open_presentation(path: &std::path::Path) -> Result<()> {
     let status = Command::new(opener)
         .arg(path)
         .status()
-        .map_err(|error| format!("無法開啟來源簡報：{error}"))?;
+        .map_err(|error| format!("無法開啟{label}：{error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err("無法用預設簡報程式開啟來源檔。".into())
+        Err(format!("無法開啟{label}。"))
     }
 }
 
 #[cfg(windows)]
-fn open_presentation(path: &std::path::Path) -> Result<()> {
+fn open_path(path: &std::path::Path, label: &str) -> Result<()> {
     use std::{ffi::c_void, ptr::null};
     #[link(name = "ole32")]
     unsafe extern "system" {
@@ -272,7 +297,7 @@ fn open_presentation(path: &std::path::Path) -> Result<()> {
     if result > 32 {
         Ok(())
     } else {
-        Err(format!("無法用預設簡報程式開啟來源檔（代碼 {result}）。"))
+        Err(format!("無法開啟{label}（代碼 {result}）。"))
     }
 }
 
@@ -287,22 +312,9 @@ async fn open_output_folder(app: AppHandle) -> Result<()> {
             .filter(|_| workspace.exported)
             .ok_or("尚未匯出簡報。")?
     };
-    #[cfg(target_os = "macos")]
-    let opener = "/usr/bin/open";
-    #[cfg(target_os = "windows")]
-    let opener = "explorer.exe";
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let opener = "xdg-open";
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut process = Command::new(opener)
-            .arg(display_path(&path))
-            .spawn()
-            .map_err(|error| format!("無法開啟資料夾：{error}"))?;
-        let _ = process.wait();
-        Ok(())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || open_path(&path, "輸出資料夾"))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn main() {
