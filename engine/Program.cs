@@ -212,14 +212,49 @@ static object Export(ExportRequest request)
             {
                 if (scale != 1 && part.SlideMaster.TextStyles is { } styles)
                     ScaleText(styles, scale);
-                ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale), scale);
+                ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale));
                 part.SlideMaster.Save();
             }
             foreach (var (tree, root, master, style, scale) in shapeDefaults)
             {
-                if (tree is null || style is null)
+                if (tree is null)
                     continue;
-                var scaled = ScaledDefaults(style, scale)!;
+                var scaled = ScaledDefaults(style, scale);
+                if (scale != 1 && tree.Descendants<Drawing.TableCell>().Any())
+                {
+                    var size = Math.Clamp((int)Math.Round(1800 * scale), 100, 400000);
+                    var masterText = master.SlideMaster.TextStyles?.OtherStyle;
+                    foreach (var cell in tree.Descendants<Drawing.TableCell>())
+                    {
+                        if (cell.TextBody is not { } textBody)
+                            continue;
+                        foreach (var paragraph in textBody.Elements<Drawing.Paragraph>())
+                        {
+                            var level = paragraph.ParagraphProperties?.Level?.Value ?? 0;
+                            var masterSize = masterText?.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+                                .FirstOrDefault(item => item.LocalName == $"lvl{level + 1}pPr")
+                                ?.GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize ??
+                                masterText?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
+                                    .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize;
+                            if (masterSize is not null || textBody.ListStyle?.Descendants<Drawing.DefaultRunProperties>()
+                                .Any(run => run.FontSize is not null) == true)
+                                continue;
+                            var properties = paragraph.ParagraphProperties ??= new Drawing.ParagraphProperties();
+                            var defaults = properties.GetFirstChild<Drawing.DefaultRunProperties>();
+                            if (defaults is null)
+                            {
+                                defaults = new Drawing.DefaultRunProperties();
+                                properties.AddChild(defaults);
+                            }
+                            defaults.FontSize ??= size;
+                        }
+                    }
+                }
+                if (scaled is null)
+                {
+                    root.Save();
+                    continue;
+                }
                 foreach (var shape in tree.Descendants<Shape>())
                 {
                     var properties = shape.NonVisualShapeProperties;
@@ -231,13 +266,15 @@ static object Export(ExportRequest request)
                         master.SlideMaster.TextStyles?.OtherStyle is { } other)
                     {
                         // Local list defaults already take precedence over the master.
-                        if (body.ListStyle?.HasChildren == true)
+                        if (body.ListStyle?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
+                            .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize is not null)
                             continue;
                         var inherited = new Drawing.ListStyle();
                         foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
                             inherited.AddChild(level.CloneNode(true));
                         MergeTextProperties(inherited, scaled);
-                        body.ListStyle = inherited;
+                        body.ListStyle ??= new Drawing.ListStyle();
+                        MergeTextProperties(body.ListStyle, inherited);
                         continue;
                     }
                     body.ListStyle ??= new Drawing.ListStyle();
@@ -386,25 +423,16 @@ static string? FormatKey(OpenXmlElement? value)
     return Normalize(XElement.Parse(value.OuterXml)).ToString(SaveOptions.DisableFormatting);
 }
 
-static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults, double scale)
+static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults)
 {
-    if (defaults is null && scale == 1)
+    if (defaults is null)
         return;
     master.TextStyles ??= new TextStyles();
     var styles = master.TextStyles;
     styles.TitleStyle ??= new TitleStyle();
     styles.BodyStyle ??= new BodyStyle();
-    if (defaults is not null)
-        foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
-            MergeTextProperties(style, defaults);
-    if (scale != 1)
-    {
-        styles.OtherStyle ??= new OtherStyle();
-        var size = Math.Clamp((int)Math.Round(1800 * scale), 100, 400000);
-        var fallback = new OtherStyle(new Drawing.Level1ParagraphProperties(
-            new Drawing.DefaultRunProperties { FontSize = size }));
-        MergeTextProperties(styles.OtherStyle, fallback);
-    }
+    foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
+        MergeTextProperties(style, defaults);
 }
 
 static DefaultTextStyle? ScaledDefaults(DefaultTextStyle? source, double scale)
