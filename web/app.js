@@ -220,13 +220,16 @@ function drawPage() {
     open.addEventListener("click", () => openSource(revision, hit.id));
     row.addEventListener("contextmenu", event => {
       event.preventDefault();
-      showSourceMenu(revision, hit.id, open, event.clientX, event.clientY);
+      const focused = document.activeElement;
+      const trigger = row.contains(focused) ? focused : open;
+      showSourceMenu(revision, hit.id, trigger, event.clientX, event.clientY);
     });
-    open.addEventListener("keydown", event => {
+    row.addEventListener("keydown", event => {
       if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
       event.preventDefault();
-      const { left, bottom } = open.getBoundingClientRect();
-      showSourceMenu(revision, hit.id, open, left, bottom);
+      const trigger = event.target;
+      const { left, bottom } = trigger.getBoundingClientRect();
+      showSourceMenu(revision, hit.id, trigger, left, bottom);
     });
     if (pieces.length) addText(source, "span", pieces.join(" / "), "row-detail");
     row.insertCell().textContent = String(hit.page);
