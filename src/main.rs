@@ -2,7 +2,7 @@
 
 mod core;
 
-use crate::core::{Exported, Hit, Job, Result, Scan, display_path};
+use crate::core::{ExportOptions, Exported, Hit, Job, Result, Scan, display_path};
 use serde::Serialize;
 use std::{
     path::PathBuf,
@@ -160,7 +160,14 @@ fn cancel_scan(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-async fn export(app: AppHandle, revision: u64, ids: Vec<usize>, name: String) -> Result<Exported> {
+async fn export(
+    app: AppHandle,
+    revision: u64,
+    ids: Vec<usize>,
+    name: String,
+    security_name: bool,
+    canvas: Option<(u32, u32)>,
+) -> Result<Exported> {
     let active = ActiveJob::begin(&app, true)?;
     let scan = {
         let state = app.state::<AppState>();
@@ -179,6 +186,10 @@ async fn export(app: AppHandle, revision: u64, ids: Vec<usize>, name: String) ->
             &scan,
             ids,
             &name,
+            ExportOptions {
+                security_name,
+                canvas,
+            },
             &active.job,
         )?;
         app.state::<AppState>().0.lock().unwrap().exported = true;
@@ -186,6 +197,84 @@ async fn export(app: AppHandle, revision: u64, ids: Vec<usize>, name: String) ->
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn open_source(app: AppHandle, revision: u64, id: usize) -> Result<()> {
+    let (root, scan) = {
+        let state = app.state::<AppState>();
+        let workspace = state.0.lock().unwrap();
+        let root = workspace.folder.clone().ok_or("請先選擇資料夾。")?;
+        let scan = workspace
+            .current
+            .as_ref()
+            .filter(|_| workspace.revision == revision)
+            .cloned()
+            .ok_or("搜尋結果已過期，請重新搜尋。")?;
+        (root, scan)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = core::source_path(&root, &scan, id)?;
+        open_presentation(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[cfg(not(windows))]
+fn open_presentation(path: &std::path::Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let opener = "/usr/bin/open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    let status = Command::new(opener)
+        .arg(path)
+        .status()
+        .map_err(|error| format!("無法開啟來源簡報：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("無法用預設簡報程式開啟來源檔。".into())
+    }
+}
+
+#[cfg(windows)]
+fn open_presentation(path: &std::path::Path) -> Result<()> {
+    use std::{ffi::c_void, ptr::null};
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *const c_void, flags: u32) -> i32;
+        fn CoUninitialize();
+    }
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *const c_void,
+            verb: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    let file: Vec<u16> = display_path(path).encode_utf16().chain([0]).collect();
+    const COINIT_APARTMENTTHREADED: u32 = 2;
+    const COINIT_DISABLE_OLE1DDE: u32 = 4;
+    // ShellExecute may invoke a COM file association on this worker thread.
+    let result = unsafe {
+        let init = CoInitializeEx(null(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if init < 0 {
+            return Err(format!("無法初始化 Windows 開檔服務（0x{init:08X}）。"));
+        }
+        let result = ShellExecuteW(null(), null(), file.as_ptr(), null(), null(), 1);
+        CoUninitialize();
+        result
+    };
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(format!("無法用預設簡報程式開啟來源檔（代碼 {result}）。"))
+    }
 }
 
 #[tauri::command]
@@ -226,6 +315,7 @@ fn main() {
             search,
             cancel_scan,
             export,
+            open_source,
             open_output_folder
         ])
         .run(tauri::generate_context!())

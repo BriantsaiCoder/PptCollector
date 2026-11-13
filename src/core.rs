@@ -331,7 +331,8 @@ fn is_reparse_directory(_: &Path) -> bool {
     false
 }
 
-fn output_name(input: &str) -> Result<String> {
+fn output_name(input: &str, security: bool) -> Result<String> {
+    const SUFFIX: &str = "_(Security C)";
     let trimmed = input.trim();
     let stem = if trimmed.to_ascii_lowercase().ends_with(".pptx") {
         &trimmed[..trimmed.len() - 5]
@@ -353,17 +354,42 @@ fn output_name(input: &str) -> Result<String> {
                 )
             })
         });
+    let has_security_suffix = stem
+        .get(stem.len().saturating_sub(SUFFIX.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX));
+    let name = if security && has_security_suffix {
+        &stem[..stem.len() - SUFFIX.len()]
+    } else {
+        stem
+    };
+    let suffix = if security { SUFFIX } else { "" };
     if stem.is_empty()
         || stem.ends_with(['.', ' '])
         || reserved
-        || stem.len() > 245
+        || name.len() + suffix.len() > 245
         || stem
             .chars()
             .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
     {
         return Err("請輸入可在 Mac 與 Windows 使用的檔名，例如「良率分析」。".into());
     }
-    Ok(format!("{stem}.pptx"))
+    Ok(format!("{name}{suffix}.pptx"))
+}
+
+pub fn source_path(root: &Path, scan: &Scan, id: usize) -> Result<PathBuf> {
+    let source = scan.sources.get(id).ok_or("搜尋結果已過期，請重新搜尋。")?;
+    let path = source
+        .path
+        .canonicalize()
+        .map_err(|error| format!("找不到來源簡報：{error}"))?;
+    if path != source.path
+        || !path.starts_with(root)
+        || !path.is_file()
+        || !file_type(&path, "pptx")
+    {
+        return Err("來源簡報已移動或變更，請重新搜尋。".into());
+    }
+    Ok(path)
 }
 
 #[derive(Debug, Serialize)]
@@ -372,15 +398,22 @@ pub struct Exported {
     pub count: usize,
 }
 
+#[derive(Default)]
+pub struct ExportOptions {
+    pub security_name: bool,
+    pub canvas: Option<(u32, u32)>,
+}
+
 pub fn export(
     engine: &Path,
     root: &Path,
     scan: &Scan,
     ids: Vec<usize>,
     name: &str,
+    options: ExportOptions,
     job: &Job,
 ) -> Result<Exported> {
-    let target = root.join(output_name(name)?);
+    let target = root.join(output_name(name, options.security_name)?);
     if target.symlink_metadata().is_ok() {
         return Err("已有同名檔案，請換一個檔名。".into());
     }
@@ -391,18 +424,20 @@ pub fn export(
     ids.sort_unstable();
     ids.dedup();
     let mut dimensions = None;
+    let mut canvas_found = false;
     let mut files: Vec<(&Source, Vec<u32>)> = Vec::new();
     for id in ids {
         let hit = scan.hits.get(id).ok_or("搜尋結果已過期，請重新搜尋。")?;
         let source = &scan.sources[id];
         let size = (hit.width, hit.height);
-        if dimensions.is_some_and(|expected| expected != size) {
+        if options.canvas.is_none() && dimensions.is_some_and(|expected| expected != size) {
             return Err(format!(
                 "尺寸不同：{} 第 {} 頁。請只勾選相同尺寸的投影片。",
                 hit.path, hit.page
             ));
         }
         dimensions = Some(size);
+        canvas_found |= options.canvas == Some(size);
         match files.last_mut() {
             Some((previous, pages)) if previous.path == source.path => pages.push(hit.page),
             _ => files.push((source, vec![hit.page])),
@@ -410,6 +445,9 @@ pub fn export(
     }
     if files.is_empty() {
         return Err("請至少選取一張投影片。".into());
+    }
+    if options.canvas.is_some() && !canvas_found {
+        return Err("請從已選取的投影片尺寸中選擇輸出尺寸。".into());
     }
     job.check()?;
     let temp = tempfile::Builder::new()
@@ -428,7 +466,7 @@ pub fn export(
         count: usize,
     }
     let report = Engine::start(engine, job)?.request::<Report>(json!({
-        "kind": "export", "path": temp_name, "files": sources?
+        "kind": "export", "path": temp_name, "files": sources?, "canvas": options.canvas
     }))??;
     job.check()?;
     temp.persist_noclobber(&target).map_err(|error| {

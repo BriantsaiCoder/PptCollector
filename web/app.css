@@ -141,7 +141,7 @@ th:nth-child(2) { width: 38%; }
 th:nth-child(3) { width: 51px; }
 tr:has(input:checked) td { background: #f6f9ff; }
 td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue); }
-.file-name { font-weight: 650; }
+.file-name { border: 0; padding: 0; background: none; color: var(--blue); font-weight: 650; text-decoration: underline; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
 .row-detail, .snippet { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 2px; }
 .matched { color: #1b439c; font-size: 12px; font-weight: 650; }
 .page-controls { flex: none; padding: 8px 18px; display: flex; justify-content: flex-end; align-items: center; gap: 9px; }
@@ -151,6 +151,10 @@ td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue)
 .export-description p { margin-top: 3px; }
 .output-field { min-width: 0; }
 .output-field .suffix-field { margin-top: 3px; }
+.security-option { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; }
+.security-option input { margin: 0; accent-color: var(--blue); }
+#canvas-panel { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+#canvas { min-height: 30px; padding-block: 2px; }
 .export-actions { display: flex; align-items: center; gap: 8px; }
 .export-bar .primary { min-height: 40px; }
 #output-path { grid-column: 1 / -1; overflow-wrap: anywhere; max-height: 3.1em; overflow: auto; }
