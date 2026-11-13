@@ -249,6 +249,10 @@ static object Export(ExportRequest request)
         }
         if (textDefaults.Any(item => item.Scale != 1) || textDefaults.Select(item => FormatKey(item.Style)).Distinct().Skip(1).Any())
         {
+            // In PowerPoint, omitting this element also changes the implicit typeface.
+            // Keep its presence without imposing one source's defaults on the others.
+            if (textDefaults.All(item => item.Style is not null))
+                destination.Presentation.DefaultTextStyle = new DefaultTextStyle();
             foreach (var (part, style, scale) in textDefaults)
             {
                 if (scale != 1 && part.SlideMaster.TextStyles is { } styles)
