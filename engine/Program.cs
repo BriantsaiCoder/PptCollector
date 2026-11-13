@@ -261,14 +261,13 @@ static object Export(ExportRequest request)
                     if (properties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
                         shape.TextBody is not { } body)
                         continue;
+                    if (body.ListStyle?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
+                        .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize is not null)
+                        continue; // Keep a shape's own default size ahead of any inherited level.
                     var styleForShape = scaled;
                     if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
                         master.SlideMaster.TextStyles?.OtherStyle is { } other)
                     {
-                        // Local list defaults already take precedence over the master.
-                        if (body.ListStyle?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
-                            .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize is not null)
-                            continue;
                         var inherited = new Drawing.ListStyle();
                         foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
                             inherited.AddChild(level.CloneNode(true));
