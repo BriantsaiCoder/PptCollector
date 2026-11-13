@@ -146,13 +146,14 @@ static object Export(ExportRequest request)
                     var layoutPart = copy.SlideLayoutPart;
                     var master = layoutPart?.SlideMasterPart ??
                         throw new InvalidDataException($"{file.Label} 第 {page} 頁缺少母片。");
+                    var masterLines = resize ? master.ThemePart?.Theme.ThemeElements?.FormatScheme?.LineStyleList : null;
                     if (registeredMasters.Add(master.Uri))
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         shapeDefaults.Add((master.SlideMaster.CommonSlideData?.ShapeTree, master.SlideMaster, master,
                             origin.Presentation.DefaultTextStyle, scale, null));
                         if (resize)
-                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize);
+                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, masterLines);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
@@ -164,6 +165,7 @@ static object Export(ExportRequest request)
                             var layoutTree = layout.SlideLayout.CommonSlideData?.ShapeTree;
                             if (resize)
                                 FitCanvas(layoutTree, size, targetSize,
+                                    layout.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ?? masterLines,
                                     master: master.SlideMaster.CommonSlideData?.ShapeTree);
                             UpdateTableStyleReferences(layoutTree, styleIds);
                             layout.SlideLayout.Save();
@@ -174,6 +176,8 @@ static object Export(ExportRequest request)
                     if (resize)
                     {
                         FitCanvas(tree, size, targetSize,
+                            copy.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ??
+                            layoutPart!.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ?? masterLines,
                             master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart!.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
@@ -664,7 +668,7 @@ static void ScaleLineWidths(OpenXmlElement tree, double scale)
             line.Width = (int)Math.Clamp(Math.Round(widthEmu * scale), 0, 20116800);
 }
 
-static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
+static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawing.LineStyleList? themeLines,
     ShapeTree? master = null, ShapeTree? layout = null)
 {
     if (tree is null)
@@ -703,6 +707,18 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
                 foreach (var branch in alternate.ChildElements.OfType<OpenXmlCompositeElement>())
                     FitShapes(branch, dx, dy);
                 continue;
+            }
+            // Keep theme colors and effects; only make the inherited width local for scaling.
+            if (scale != 1 && themeLines is not null &&
+                shape.GetFirstChild<ShapeStyle>()?.LineReference?.Index?.Value is > 0 and <= int.MaxValue and var index &&
+                shape.GetFirstChild<ShapeProperties>() is { } properties &&
+                themeLines.Elements<Drawing.Outline>().ElementAtOrDefault((int)index - 1)?.Width?.Value is { } inheritedWidth)
+            {
+                var outline = properties.GetFirstChild<Drawing.Outline>();
+                if (outline is null)
+                    properties.AddChild(new Drawing.Outline { Width = inheritedWidth });
+                else if (outline.Width is null)
+                    outline.Width = inheritedWidth;
             }
             Move(shape switch
             {
