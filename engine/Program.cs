@@ -256,10 +256,7 @@ static object Export(ExportRequest request)
                     if (properties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
                         shape.TextBody is not { } body)
                         continue;
-                    if (body.ListStyle?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
-                        .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize is not null)
-                        continue; // Keep a shape's own default size ahead of any inherited level.
-                    var styleForShape = scaled;
+                    OpenXmlCompositeElement styleForShape = scaled;
                     if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
                         master.SlideMaster.TextStyles?.OtherStyle is { } other)
                     {
@@ -267,11 +264,18 @@ static object Export(ExportRequest request)
                         foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
                             inherited.AddChild(level.CloneNode(true));
                         MergeTextProperties(inherited, scaled);
-                        body.ListStyle ??= new Drawing.ListStyle();
-                        MergeTextProperties(body.ListStyle, inherited);
-                        continue;
+                        styleForShape = inherited;
                     }
                     body.ListStyle ??= new Drawing.ListStyle();
+                    if (body.ListStyle.GetFirstChild<Drawing.DefaultParagraphProperties>()?
+                        .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize?.Value is { } localSize)
+                    {
+                        // A newly added level must not replace an explicit local default size.
+                        styleForShape = (OpenXmlCompositeElement)styleForShape.CloneNode(true);
+                        foreach (var level in styleForShape.ChildElements.OfType<Drawing.TextParagraphPropertiesType>())
+                            if (level.GetFirstChild<Drawing.DefaultRunProperties>() is { } propertiesAtLevel)
+                                propertiesAtLevel.FontSize = localSize;
+                    }
                     MergeTextProperties(body.ListStyle, styleForShape);
                 }
                 root.Save();
