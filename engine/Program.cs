@@ -131,7 +131,11 @@ static object Export(ExportRequest request)
                 if (resize && request.Canvas is null)
                     throw new InvalidDataException($"{file.Label} 的投影片尺寸不同，請選擇輸出尺寸。");
                 var scale = CanvasScale(size, targetSize);
-                var styleIds = CopyTableStyles(origin.TableStylesPart?.TableStyleList, destination, tableStyles, file.Label);
+                var sourceTableStyles = origin.TableStylesPart?.TableStyleList;
+                var styleIds = CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, scale);
+                var notesStyleIds = scale != 1 && file.Pages.Any(page => sourceSlides[page - 1].NotesSlidePart is not null)
+                    ? CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, 1)
+                    : styleIds;
                 var sourceNotesSignatures = new Dictionary<Uri, string>();
                 CopyEmbeddedFonts(origin, destination, embeddedFonts, file.Label);
 
@@ -179,12 +183,12 @@ static object Export(ExportRequest request)
                     shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale,
                         layoutPart!.SlideLayout.CommonSlideData?.ShapeTree));
                     if (copy.NotesSlidePart is { } notes &&
-                        UpdateTableStyleReferences(notes.NotesSlide, styleIds))
+                        UpdateTableStyleReferences(notes.NotesSlide, notesStyleIds))
                         notes.NotesSlide.Save();
                     if (copy.NotesSlidePart is { NotesMasterPart: { } copiedMaster } linkedNotes)
                     {
                         var originalMaster = original.NotesSlidePart!.NotesMasterPart!.Uri;
-                        if (UpdateTableStyleReferences(copiedMaster.NotesMaster, styleIds))
+                        if (UpdateTableStyleReferences(copiedMaster.NotesMaster, notesStyleIds))
                             copiedMaster.NotesMaster.Save();
                         if (notesMaster is null)
                         {
@@ -270,7 +274,6 @@ static object Export(ExportRequest request)
                 }
                 foreach (var shape in tree.Descendants<Shape>())
                 {
-                    var properties = shape.NonVisualShapeProperties;
                     if (shape.TextBody is not { } body)
                         continue;
                     var placeholder = ShapePlaceholder(shape);
@@ -298,21 +301,11 @@ static object Export(ExportRequest request)
                     var fontRef = shape.ShapeStyle?.GetFirstChild<Drawing.FontReference>();
                     var hasThemeFont = fontRef?.Index?.Value is { } fontIndex &&
                         fontIndex != Drawing.FontCollectionIndexValues.None;
-                    if (!hasThemeFont && properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
-                        master.SlideMaster.TextStyles?.OtherStyle is { } other)
-                    {
-                        var inherited = new Drawing.ListStyle();
-                        foreach (var level in other.ChildElements)
-                            inherited.AddChild(level.CloneNode(true));
-                        MergeTextDefaults(inherited, scaled);
-                        styleForShape = inherited;
-                    }
                     var hasThemeColor = fontRef?.HasChildren == true;
                     if (hasThemeFont || hasThemeColor)
                     {
                         // An index of "none" can still specify a color without choosing a theme typeface.
-                        if (ReferenceEquals(styleForShape, scaled))
-                            styleForShape = (OpenXmlCompositeElement)scaled.CloneNode(true);
+                        styleForShape = (OpenXmlCompositeElement)scaled.CloneNode(true);
                         foreach (var run in styleForShape.Descendants<Drawing.DefaultRunProperties>())
                             foreach (var property in run.ChildElements.Where(property =>
                                 (hasThemeColor && TextPropertyChoice(property.LocalName) == "fill") ||
@@ -570,7 +563,7 @@ static string? TextPropertyChoice(string name) => name switch
 };
 
 static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source,
-    PresentationPart target, Dictionary<string, string> seen, string label)
+    PresentationPart target, Dictionary<string, string> seen, string label, double scale)
 {
     var remap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     if (source is null)
@@ -586,7 +579,9 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
         // The Table Styles package part cannot own image relationships.
         if (style.Descendants<Drawing.Blip>().Any(blip => blip.Embed is not null || blip.Link is not null))
             throw new InvalidDataException($"{label} 的表格樣式使用了不支援的外部圖片關聯。");
-        var signature = FormatKey(style)!;
+        var clone = (Drawing.TableStyleEntry)style.CloneNode(true);
+        ScaleLineWidths(clone, scale);
+        var signature = FormatKey(clone)!;
         var key = id.ToUpperInvariant() + "\n" + signature;
         if (seen.TryGetValue(key, out var priorId))
         {
@@ -598,7 +593,6 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
         remap.Add(id, newId);
         id = newId;
         seen.Add(key, id);
-        var clone = (Drawing.TableStyleEntry)style.CloneNode(true);
         clone.StyleId = id;
         targetPart.TableStyleList.AppendChild(clone);
     }
@@ -660,6 +654,15 @@ static Shape? FindLayoutPlaceholder(ShapeTree? layout, PlaceholderShape current)
     layout?.Descendants<Shape>().FirstOrDefault(candidate =>
         ShapePlaceholder(candidate) is { } inherited &&
         (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0));
+
+static void ScaleLineWidths(OpenXmlElement tree, double scale)
+{
+    if (scale == 1)
+        return;
+    foreach (var line in tree.Descendants<Drawing.LinePropertiesType>())
+        if (line.Width?.Value is { } widthEmu)
+            line.Width = (int)Math.Clamp(Math.Round(widthEmu * scale), 0, 20116800);
+}
 
 static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
     ShapeTree? master = null, ShapeTree? layout = null)
@@ -737,12 +740,9 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
     }
 
     FitShapes(tree, left, top);
+    ScaleLineWidths(tree, scale);
     if (scale != 1)
     {
-        foreach (var line in tree.Descendants<Drawing.LinePropertiesType>())
-            if (line.Width?.Value is { } widthEmu)
-                line.Width = (int)Math.Clamp(Scale(widthEmu), 0, 20116800);
-
         // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted objects.
         foreach (var shape in tree.Descendants<Shape>())
         {
