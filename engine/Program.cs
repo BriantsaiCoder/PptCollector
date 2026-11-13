@@ -102,6 +102,8 @@ static object Export(ExportRequest request)
         var embeddedFonts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var registeredMasters = new HashSet<Uri>();
         NotesMasterPart? notesMaster = null;
+        string? notesSource = null;
+        Uri? notesSourceMaster = null;
         string? notesSignature = null;
 
         foreach (var file in request.Files)
@@ -130,7 +132,7 @@ static object Export(ExportRequest request)
                     throw new InvalidDataException($"{file.Label} 的投影片尺寸不同，請選擇輸出尺寸。");
                 var scale = CanvasScale(size, targetSize);
                 var styleIds = CopyTableStyles(origin.TableStylesPart?.TableStyleList, destination, tableStyles, file.Label);
-                string? sourceNotesSignature = null;
+                var sourceNotesSignatures = new Dictionary<Uri, string>();
                 CopyEmbeddedFonts(origin, destination, embeddedFonts, file.Label);
 
                 foreach (var page in file.Pages)
@@ -140,14 +142,13 @@ static object Export(ExportRequest request)
                     var layoutPart = copy.SlideLayoutPart;
                     var master = layoutPart?.SlideMasterPart ??
                         throw new InvalidDataException($"{file.Label} 第 {page} 頁缺少母片。");
-                    var objectDefaults = resize ? master.ThemePart?.Theme.ObjectDefaults : null;
                     if (registeredMasters.Add(master.Uri))
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         shapeDefaults.Add((master.SlideMaster.CommonSlideData?.ShapeTree, master.SlideMaster, master,
                             origin.Presentation.DefaultTextStyle, scale));
                         if (resize)
-                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, objectDefaults);
+                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
@@ -158,7 +159,7 @@ static object Export(ExportRequest request)
                         {
                             var layoutTree = layout.SlideLayout.CommonSlideData?.ShapeTree;
                             if (resize)
-                                FitCanvas(layoutTree, size, targetSize, objectDefaults,
+                                FitCanvas(layoutTree, size, targetSize,
                                     master: master.SlideMaster.CommonSlideData?.ShapeTree);
                             UpdateTableStyleReferences(layoutTree, styleIds);
                             layout.SlideLayout.Save();
@@ -168,7 +169,7 @@ static object Export(ExportRequest request)
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
                     {
-                        FitCanvas(tree, size, targetSize, objectDefaults,
+                        FitCanvas(tree, size, targetSize,
                             master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart!.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
@@ -176,12 +177,19 @@ static object Export(ExportRequest request)
                     UpdateTableStyleReferences(tree, styleIds);
                     copy.Slide.Save();
                     shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale));
-                    if (copy.NotesSlidePart is { NotesMasterPart: { } copiedMaster } notes)
+                    if (copy.NotesSlidePart is { } notes &&
+                        UpdateTableStyleReferences(notes.NotesSlide, styleIds))
+                        notes.NotesSlide.Save();
+                    if (copy.NotesSlidePart is { NotesMasterPart: { } copiedMaster } linkedNotes)
                     {
+                        var originalMaster = original.NotesSlidePart!.NotesMasterPart!.Uri;
+                        if (UpdateTableStyleReferences(copiedMaster.NotesMaster, styleIds))
+                            copiedMaster.NotesMaster.Save();
                         if (notesMaster is null)
                         {
                             notesMaster = destination.AddPart(copiedMaster);
-                            notesSignature = sourceNotesSignature ??= NotesSignature(copiedMaster);
+                            notesSource = file.Path;
+                            notesSourceMaster = originalMaster;
                             if (origin.Presentation.NotesSize is { } notesSize)
                                 destination.Presentation.NotesSize = (NotesSize)notesSize.CloneNode(true);
                             destination.Presentation.NotesMasterIdList = new NotesMasterIdList(
@@ -189,13 +197,22 @@ static object Export(ExportRequest request)
                         }
                         else if (notesMaster.Uri != copiedMaster.Uri)
                         {
-                            var notesSize = origin.Presentation.NotesSize;
-                            if (notesSignature != (sourceNotesSignature ??= NotesSignature(copiedMaster)) ||
-                                (notesSize is not null && FormatKey(notesSize) != FormatKey(destination.Presentation.NotesSize)))
-                                throw new InvalidDataException($"{file.Label} 的備忘稿母片或尺寸不同，請分開匯出以保留備忘稿樣式。");
-                            var id = notes.GetIdOfPart(copiedMaster);
-                            notes.DeletePart(copiedMaster);
-                            notes.AddPart(notesMaster, id);
+                            if (notesSource != file.Path || notesSourceMaster != originalMaster)
+                            {
+                                notesSignature ??= NotesSignature(notesMaster, Path.GetFileName(notesSource));
+                                if (!sourceNotesSignatures.TryGetValue(originalMaster, out var sourceSignature))
+                                {
+                                    sourceSignature = NotesSignature(copiedMaster, file.Label);
+                                    sourceNotesSignatures.Add(originalMaster, sourceSignature);
+                                }
+                                var notesSize = origin.Presentation.NotesSize;
+                                if (notesSignature != sourceSignature ||
+                                    (notesSize is not null && FormatKey(notesSize) != FormatKey(destination.Presentation.NotesSize)))
+                                    throw new InvalidDataException($"{file.Label} 的備忘稿母片或尺寸不同，請分開匯出以保留備忘稿樣式。");
+                            }
+                            var id = linkedNotes.GetIdOfPart(copiedMaster);
+                            linkedNotes.DeletePart(copiedMaster);
+                            linkedNotes.AddPart(notesMaster, id);
                         }
                     }
                     slides.AppendChild(new SlideId { Id = slideId++, RelationshipId = destination.GetIdOfPart(copy) });
@@ -220,9 +237,8 @@ static object Export(ExportRequest request)
                 if (tree is null)
                     continue;
                 var scaled = ScaledDefaults(style, scale);
-                if (scale != 1 && tree.Descendants<Drawing.TableCell>().Any())
+                if (scaled is not null)
                 {
-                    var size = Math.Clamp((int)Math.Round(1800 * scale), 100, 400000);
                     var masterText = master.SlideMaster.TextStyles?.OtherStyle;
                     foreach (var cell in tree.Descendants<Drawing.TableCell>())
                     {
@@ -231,7 +247,8 @@ static object Export(ExportRequest request)
                         foreach (var paragraph in textBody.Elements<Drawing.Paragraph>())
                         {
                             var level = paragraph.ParagraphProperties?.Level?.Value ?? 0;
-                            if (FontSizeAtLevel(masterText, level) is not null ||
+                            var size = FontSizeAtLevel(scaled, level);
+                            if (size is null || FontSizeAtLevel(masterText, level) is not null ||
                                 FontSizeAtLevel(textBody.ListStyle, level) is not null)
                                 continue;
                             var properties = paragraph.ParagraphProperties ??= new Drawing.ParagraphProperties();
@@ -241,7 +258,7 @@ static object Export(ExportRequest request)
                                 defaults = new Drawing.DefaultRunProperties();
                                 properties.AddChild(defaults);
                             }
-                            defaults.FontSize ??= size;
+                            defaults.FontSize ??= size.Value;
                         }
                     }
                 }
@@ -257,34 +274,32 @@ static object Export(ExportRequest request)
                         shape.TextBody is not { } body)
                         continue;
                     OpenXmlCompositeElement styleForShape = scaled;
-                    if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
+                    var fontRef = shape.ShapeStyle?.GetFirstChild<Drawing.FontReference>();
+                    var hasThemeFont = fontRef?.Index?.Value is { } fontIndex &&
+                        fontIndex != Drawing.FontCollectionIndexValues.None;
+                    if (!hasThemeFont && properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
                         master.SlideMaster.TextStyles?.OtherStyle is { } other)
                     {
                         var inherited = new Drawing.ListStyle();
-                        foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
+                        foreach (var level in other.ChildElements)
                             inherited.AddChild(level.CloneNode(true));
-                        MergeTextProperties(inherited, scaled);
+                        MergeTextDefaults(inherited, scaled);
                         styleForShape = inherited;
                     }
-                    body.ListStyle ??= new Drawing.ListStyle();
-                    if (body.ListStyle.GetFirstChild<Drawing.DefaultParagraphProperties>() is { } localDefault)
+                    var hasThemeColor = fontRef?.HasChildren == true;
+                    if (hasThemeFont || hasThemeColor)
                     {
-                        // Existing local levels win; fill inherited levels using local defaults first.
-                        foreach (var inheritedLevel in styleForShape.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
-                            .Where(level => level is not Drawing.DefaultParagraphProperties))
-                        {
-                            var level = body.ListStyle.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
-                                .FirstOrDefault(item => item.GetType() == inheritedLevel.GetType());
-                            if (level is null)
-                            {
-                                level = (Drawing.TextParagraphPropertiesType)inheritedLevel.CloneNode(false);
-                                level.ClearAllAttributes();
-                                body.ListStyle.AddChild(level);
-                            }
-                            MergeTextProperties(level, localDefault);
-                        }
+                        // An index of "none" can still specify a color without choosing a theme typeface.
+                        if (ReferenceEquals(styleForShape, scaled))
+                            styleForShape = (OpenXmlCompositeElement)scaled.CloneNode(true);
+                        foreach (var run in styleForShape.Descendants<Drawing.DefaultRunProperties>())
+                            foreach (var property in run.ChildElements.Where(property =>
+                                (hasThemeColor && TextPropertyChoice(property.LocalName) == "fill") ||
+                                (hasThemeFont && property is Drawing.LatinFont or Drawing.EastAsianFont or Drawing.ComplexScriptFont)).ToArray())
+                                property.Remove();
                     }
-                    MergeTextProperties(body.ListStyle, styleForShape);
+                    body.ListStyle ??= new Drawing.ListStyle();
+                    MergeTextDefaults(body.ListStyle, styleForShape);
                 }
                 root.Save();
             }
@@ -438,16 +453,52 @@ static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults)
     styles.TitleStyle ??= new TitleStyle();
     styles.BodyStyle ??= new BodyStyle();
     foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
-        MergeTextProperties(style, defaults);
+        MergeTextDefaults(style, defaults);
 }
 
 static DefaultTextStyle? ScaledDefaults(DefaultTextStyle? source, double scale)
 {
-    if (source is null || scale == 1)
+    if (scale == 1)
         return source;
-    var clone = (DefaultTextStyle)source.CloneNode(true);
+    var clone = (DefaultTextStyle?)source?.CloneNode(true) ?? new DefaultTextStyle();
+    var paragraph = clone.GetFirstChild<Drawing.DefaultParagraphProperties>();
+    if (paragraph is null)
+    {
+        paragraph = new Drawing.DefaultParagraphProperties();
+        clone.AddChild(paragraph);
+    }
+    var run = paragraph.GetFirstChild<Drawing.DefaultRunProperties>();
+    if (run is null)
+    {
+        run = new Drawing.DefaultRunProperties();
+        paragraph.AddChild(run);
+    }
+    // An omitted font size renders at 18pt; write it before applying the canvas scale.
+    run.FontSize ??= 1800;
     ScaleText(clone, scale);
     return clone;
+}
+
+static void MergeTextDefaults(OpenXmlCompositeElement target, OpenXmlCompositeElement fallback)
+{
+    if (target.GetFirstChild<Drawing.DefaultParagraphProperties>() is { } localDefault)
+    {
+        // A source paragraph default is closer to the text than a presentation-wide level.
+        foreach (var inheritedLevel in fallback.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+            .Where(level => level is not Drawing.DefaultParagraphProperties))
+        {
+            var level = target.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+                .FirstOrDefault(item => item.GetType() == inheritedLevel.GetType());
+            if (level is null)
+            {
+                level = (Drawing.TextParagraphPropertiesType)inheritedLevel.CloneNode(false);
+                level.ClearAllAttributes();
+                target.AddChild(level);
+            }
+            MergeTextProperties(level, localDefault);
+        }
+    }
+    MergeTextProperties(target, fallback);
 }
 
 static Int32Value? FontSizeAtLevel(OpenXmlElement? styles, int level) =>
@@ -507,7 +558,7 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
     targetPart.TableStyleList ??= new Drawing.TableStyleList { Default = source.Default?.Value };
     foreach (var style in definitions)
     {
-        var id = style.StyleId?.Value ?? throw new InvalidDataException("來源表格樣式缺少識別碼。");
+        var id = style.StyleId?.Value ?? throw new InvalidDataException($"{label} 的表格樣式缺少識別碼。");
         // The Table Styles package part cannot own image relationships.
         if (style.Descendants<Drawing.Blip>().Any(blip => blip.Embed is not null || blip.Link is not null))
             throw new InvalidDataException($"{label} 的表格樣式使用了不支援的外部圖片關聯。");
@@ -533,16 +584,21 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
     return remap;
 }
 
-static void UpdateTableStyleReferences(ShapeTree? tree, Dictionary<string, string> remap)
+static bool UpdateTableStyleReferences(OpenXmlElement? content, Dictionary<string, string> remap)
 {
-    if (tree is null || remap.Count == 0)
-        return;
-    foreach (var reference in tree.Descendants<Drawing.TableStyleId>())
+    if (content is null || remap.Count == 0)
+        return false;
+    var changed = false;
+    foreach (var reference in content.Descendants<Drawing.TableStyleId>())
         if (remap.TryGetValue(reference.Text, out var resolved))
+        {
             reference.Text = resolved;
+            changed = true;
+        }
+    return changed;
 }
 
-static string NotesSignature(NotesMasterPart master)
+static string NotesSignature(NotesMasterPart master, string? label)
 {
     var seen = new Dictionary<Uri, int>();
     var pieces = new List<string>();
@@ -567,14 +623,14 @@ static string NotesSignature(NotesMasterPart master)
         foreach (var rel in part.HyperlinkRelationships.OrderBy(rel => rel.Id, StringComparer.Ordinal))
             pieces.Add($"{rel.Id}:{rel.IsExternal}:{rel.Uri}");
         if (part.DataPartReferenceRelationships.Any())
-            throw new InvalidDataException("備忘稿母片含有無法比對的媒體關聯。");
+            throw new InvalidDataException($"{label} 的備忘稿母片含有無法比對的媒體關聯。");
     }
     Add(master);
     return string.Join("\n", pieces);
 }
 
 static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
-    Drawing.ObjectDefaults? objectDefaults, ShapeTree? master = null, ShapeTree? layout = null)
+    ShapeTree? master = null, ShapeTree? layout = null)
 {
     if (tree is null)
         return;
@@ -668,13 +724,10 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
                         Placeholder(candidate)?.Type?.Value == masterType) == true)
                     continue; // Preserve inherited margins; their source has already been scaled.
             }
-            var isTextBox = shape.NonVisualShapeProperties?.NonVisualShapeDrawingProperties?.TextBox?.Value == true;
-            OpenXmlElement? defaults = isTextBox ? objectDefaults?.TextDefault : objectDefaults?.ShapeDefault;
-            var insets = defaults?.GetFirstChild<Drawing.BodyProperties>();
-            body.LeftInset ??= insets?.LeftInset?.Value ?? 91440;
-            body.RightInset ??= insets?.RightInset?.Value ?? 91440;
-            body.TopInset ??= insets?.TopInset?.Value ?? 45720;
-            body.BottomInset ??= insets?.BottomInset?.Value ?? 45720;
+            body.LeftInset ??= 91440;
+            body.RightInset ??= 91440;
+            body.TopInset ??= 45720;
+            body.BottomInset ??= 45720;
         }
         foreach (var cell in tree.Descendants<Drawing.TableCell>())
         {

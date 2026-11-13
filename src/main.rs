@@ -241,6 +241,11 @@ fn open_presentation(path: &std::path::Path) -> Result<()> {
 #[cfg(windows)]
 fn open_presentation(path: &std::path::Path) -> Result<()> {
     use std::{ffi::c_void, ptr::null};
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *const c_void, flags: u32) -> i32;
+        fn CoUninitialize();
+    }
     #[link(name = "shell32")]
     unsafe extern "system" {
         fn ShellExecuteW(
@@ -253,8 +258,18 @@ fn open_presentation(path: &std::path::Path) -> Result<()> {
         ) -> isize;
     }
     let file: Vec<u16> = display_path(path).encode_utf16().chain([0]).collect();
-    // A NUL-terminated filename with the default Windows association, without a shell command.
-    let result = unsafe { ShellExecuteW(null(), null(), file.as_ptr(), null(), null(), 1) };
+    const COINIT_APARTMENTTHREADED: u32 = 2;
+    const COINIT_DISABLE_OLE1DDE: u32 = 4;
+    // ShellExecute may invoke a COM file association on this worker thread.
+    let result = unsafe {
+        let init = CoInitializeEx(null(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if init < 0 {
+            return Err(format!("無法初始化 Windows 開檔服務（0x{init:08X}）。"));
+        }
+        let result = ShellExecuteW(null(), null(), file.as_ptr(), null(), null(), 1);
+        CoUninitialize();
+        result
+    };
     if result > 32 {
         Ok(())
     } else {
