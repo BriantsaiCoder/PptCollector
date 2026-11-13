@@ -98,10 +98,16 @@
       <div class="output-field">
         <label for="name">檔案名稱</label>
         <div class="suffix-field"><input id="name" autocomplete="off" value="搜尋結果" maxlength="245" required><span>.pptx</span></div>
+        <label class="security-option"><input id="security-name" type="checkbox"> 檔名加上 _(Security C)</label>
       </div>
       <div class="export-actions">
         <button id="export" type="submit" class="primary" disabled>匯出 .pptx</button>
         <button id="open" type="button" class="secondary" hidden>開啟輸出資料夾</button>
+      </div>
+      <div id="canvas-panel" hidden>
+        <label for="canvas">輸出尺寸</label>
+        <select id="canvas" aria-describedby="canvas-hint"></select>
+        <span id="canvas-hint" class="hint">其他尺寸的物件會等比例縮放並置中，圖表或背景外觀可能有差異。</span>
       </div>
       <p id="output-path" class="hint" tabindex="0">存回所選資料夾</p>
     </form>
