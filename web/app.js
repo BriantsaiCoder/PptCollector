@@ -185,7 +185,14 @@ sourceMenu.addEventListener("keydown", event => {
 sourceMenu.addEventListener("contextmenu", event => event.preventDefault());
 
 document.addEventListener("pointerdown", event => {
-  if (!sourceMenu.contains(event.target)) closeSourceMenu();
+  if (!menuSource || sourceMenu.contains(event.target)) return;
+  const { trigger } = menuSource;
+  closeSourceMenu();
+  requestAnimationFrame(() => {
+    if (!menuSource && document.activeElement === document.body) {
+      trigger.focus({ preventScroll: true });
+    }
+  });
 });
 byId("table-wrap").addEventListener("scroll", () => closeSourceMenu(true));
 window.addEventListener("resize", () => closeSourceMenu(true));
