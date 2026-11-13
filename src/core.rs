@@ -331,8 +331,22 @@ fn is_reparse_directory(_: &Path) -> bool {
     false
 }
 
+const SECURITY_SUFFIX: &str = "_(Security C)";
+const MAX_OUTPUT_STEM_BYTES: usize = 245;
+
+fn split_security_suffix(stem: &str) -> (&str, &str) {
+    let start = stem.len().saturating_sub(SECURITY_SUFFIX.len());
+    if stem
+        .get(start..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SECURITY_SUFFIX))
+    {
+        stem.split_at(start)
+    } else {
+        (stem, "")
+    }
+}
+
 fn output_name(input: &str, security: bool) -> Result<String> {
-    const SUFFIX: &str = "_(Security C)";
     let trimmed = input.trim();
     let stem = if trimmed.to_ascii_lowercase().ends_with(".pptx") {
         &trimmed[..trimmed.len() - 5]
@@ -354,19 +368,16 @@ fn output_name(input: &str, security: bool) -> Result<String> {
                 )
             })
         });
-    let has_security_suffix = stem
-        .get(stem.len().saturating_sub(SUFFIX.len())..)
-        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX));
-    let name = if security && has_security_suffix {
-        &stem[..stem.len() - SUFFIX.len()]
+    let name = if security {
+        split_security_suffix(stem).0
     } else {
         stem
     };
-    let suffix = if security { SUFFIX } else { "" };
+    let suffix = if security { SECURITY_SUFFIX } else { "" };
     if stem.is_empty()
         || stem.ends_with(['.', ' '])
         || reserved
-        || name.len() + suffix.len() > 245
+        || name.len() + suffix.len() > MAX_OUTPUT_STEM_BYTES
         || stem
             .chars()
             .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
@@ -414,10 +425,7 @@ pub fn export(
     options: ExportOptions,
     job: &Job,
 ) -> Result<Exported> {
-    let target = root.join(output_name(name, options.security_name)?);
-    if target.symlink_metadata().is_ok() {
-        return Err("已有同名檔案，請換一個檔名。".into());
-    }
+    let name = output_name(name, options.security_name)?;
     if root.canonicalize().ok().as_deref() != Some(root) {
         return Err("輸出資料夾已移動，請重新選取。".into());
     }
@@ -443,7 +451,7 @@ pub fn export(
         return Err("請從已選取的投影片尺寸中選擇輸出尺寸。".into());
     }
     job.check()?;
-    let temp = tempfile::Builder::new()
+    let mut temp = tempfile::Builder::new()
         .prefix(".pptcollector-")
         .suffix(".tmp")
         .tempfile_in(root)
@@ -460,21 +468,53 @@ pub fn export(
         count: usize,
         #[serde(default)]
         adjusted_notes: usize,
+        timestamp: String,
     }
     let report = Engine::start(engine, job)?.request::<Report>(json!({
         "kind": "export", "path": temp_name, "files": sources?, "canvas": options.canvas
     }))??;
     job.check()?;
-    temp.persist_noclobber(&target).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            "已有同名檔案，請換一個檔名。".into()
+    let stamp = report.timestamp.as_bytes();
+    if stamp.len() != 15
+        || stamp[8] != b'_'
+        || !stamp
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| i == 8 || byte.is_ascii_digit())
+    {
+        return Err("簡報處理元件回傳的日期時間格式無效。".into());
+    }
+    let (stem, security) = split_security_suffix(name.strip_suffix(".pptx").unwrap());
+    for attempt in 0..1000 {
+        let target = if attempt == 0 {
+            root.join(&name)
         } else {
-            format!("無法儲存匯出檔：{}", error.error)
+            let suffix = if attempt == 1 {
+                format!("_{}{security}", report.timestamp)
+            } else {
+                format!("_{}_{attempt}{security}", report.timestamp)
+            };
+            let end = stem.floor_char_boundary(MAX_OUTPUT_STEM_BYTES - suffix.len());
+            root.join(format!("{}{suffix}.pptx", &stem[..end]))
+        };
+        // The destination may be created after the export starts. Keep the finished
+        // temporary file and retry without replacing anything already there.
+        match temp.persist_noclobber(&target) {
+            Ok(()) => {
+                return Ok(Exported {
+                    path: display_path(&target),
+                    count: report.count,
+                    adjusted_notes: report.adjusted_notes,
+                });
+            }
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::AlreadyExists
+                    || target.symlink_metadata().is_ok() =>
+            {
+                temp = error.path;
+            }
+            Err(error) => return Err(format!("無法儲存匯出檔：{}", error.error)),
         }
-    })?;
-    Ok(Exported {
-        path: display_path(&target),
-        count: report.count,
-        adjusted_notes: report.adjusted_notes,
-    })
+    }
+    Err("目前有太多同名檔案，請換一個檔名。".into())
 }

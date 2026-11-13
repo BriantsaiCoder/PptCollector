@@ -2,7 +2,7 @@ const byId = id => document.getElementById(id);
 const bridge = window.__TAURI__;
 const PAGE_SIZE = 40;
 const SECURITY_SUFFIX = "_(Security C)";
-const state = { folder: "", terms: [], phase: "", scan: null, selected: new Set(), page: 0, exported: false };
+const state = { folder: "", terms: [], phase: "", scan: null, selected: new Set(), page: 0, exported: false, exportedPath: "" };
 const field = byId("term");
 const fileName = byId("name");
 const securityName = byId("security-name");
@@ -26,6 +26,7 @@ function stem() {
 }
 
 function outputPath() {
+  if (state.exportedPath) return state.exportedPath;
   if (!state.folder) return "存回所選資料夾";
   const separator = state.folder.includes("\\") ? "\\" : "/";
   let name = stem() || "搜尋結果";
@@ -66,6 +67,7 @@ function resetResults() {
   state.selected.clear();
   state.page = 0;
   state.exported = false;
+  state.exportedPath = "";
   notify("");
   drawResults();
 }
@@ -264,15 +266,16 @@ byId("toggle").addEventListener("click", () => {
 
 byId("previous").addEventListener("click", () => { state.page -= 1; drawPage(); });
 byId("next").addEventListener("click", () => { state.page += 1; drawPage(); });
-fileName.addEventListener("input", updateSelection);
+fileName.addEventListener("input", () => { state.exportedPath = ""; updateButtons(); });
 fileName.addEventListener("blur", () => { fileName.value = stem(); updateSelection(); });
-securityName.addEventListener("change", updateButtons);
+securityName.addEventListener("change", () => { state.exportedPath = ""; updateButtons(); });
 
 byId("export-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (state.phase || !state.scan || byId("export").disabled) return;
   state.phase = "export";
   state.exported = false;
+  state.exportedPath = "";
   notify("正在合併投影片並檢查輸出檔…");
   updateSelection();
   try {
@@ -281,6 +284,7 @@ byId("export-form").addEventListener("submit", async event => {
       securityName: securityName.checked,
     });
     state.exported = true;
+    state.exportedPath = result.path;
     const notes = result.adjusted_notes
       ? `有 ${result.adjusted_notes} 張的備忘稿沿用統一版型，內容仍可編輯。`
       : "";

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -360,7 +361,8 @@ static object Export(ExportRequest request)
     var invalid = new OpenXmlValidator(FileFormatVersions.Office2021).Validate(saved).FirstOrDefault();
     if (invalid is not null)
         throw new InvalidDataException($"輸出檔未通過 PowerPoint 結構檢查。{invalid.Part?.Uri}：{invalid.Description}");
-    return adjustedNotes == 0 ? new { count } : new { count, adjustedNotes };
+    var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+    return new { count, adjustedNotes, timestamp };
 }
 
 static FileStream? PrepareSource(FileStream source, int[] pages)
