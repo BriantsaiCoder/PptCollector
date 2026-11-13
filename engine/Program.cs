@@ -271,7 +271,8 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
                 var links = SlideLinks(part).ToArray();
                 var ids = links.Select(link => link.RelationshipId).ToHashSet(StringComparer.Ordinal);
                 var root = part.RootElement!;
-                foreach (var choice in ZoomChoices(part).ToArray())
+                // Resolve nested fallback groups before copying an outer fallback.
+                foreach (var choice in ZoomChoices(part).Reverse())
                 {
                     // The fallback picture/group keeps the thumbnail and position without the jump.
                     var alternate = (AlternateContent)choice.Parent!;
