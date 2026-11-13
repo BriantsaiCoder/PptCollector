@@ -249,7 +249,8 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
 {
     // Remove navigation before AddPart: a slide-to-slide relationship would copy an unselected target.
     using (var input = PresentationDocument.Open(source, false))
-        if (!NavigationParts(ReadPresentation(input), pages).Any(part => SlideLinks(part).Any() || JumpActions(part).Any()))
+        if (!NavigationParts(ReadPresentation(input), pages).Any(part =>
+            SlideLinks(part).Any() || JumpActions(part).Any() || ZoomChoices(part).Any()))
             return null;
 
     var path = Path.Combine(Path.GetTempPath(), $"pptcollector-{Guid.NewGuid():N}.tmp");
@@ -267,6 +268,17 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
                 var links = SlideLinks(part).ToArray();
                 var ids = links.Select(link => link.RelationshipId).ToHashSet(StringComparer.Ordinal);
                 var root = part.RootElement!;
+                foreach (var choice in ZoomChoices(part).ToArray())
+                {
+                    // The fallback picture/group keeps the thumbnail and position without the jump.
+                    var alternate = (AlternateContent)choice.Parent!;
+                    choice.Remove();
+                    if (alternate.Elements<AlternateContentChoice>().Any())
+                        continue;
+                    foreach (var visual in alternate.GetFirstChild<AlternateContentFallback>()?.ChildElements ?? [])
+                        alternate.Parent!.InsertBefore(visual.CloneNode(true), alternate);
+                    alternate.Remove();
+                }
                 foreach (var action in JumpActions(part).Concat(root.Descendants().Where(element =>
                     element.LocalName is "hlinkClick" or "hlinkHover" or "hlinkMouseOver" &&
                     element.GetAttributes().Any(attr => attr.LocalName == "id" &&
@@ -315,6 +327,14 @@ static IEnumerable<OpenXmlPart> NavigationParts(PresentationPart source, int[] p
 static IEnumerable<IdPartPair> SlideLinks(OpenXmlPart part) =>
     part is NotesSlidePart ? [] : part.Parts.Where(link => link.OpenXmlPart is SlidePart);
 
+static IEnumerable<AlternateContentChoice> ZoomChoices(OpenXmlPart part) =>
+    (part.RootElement?.Descendants<AlternateContentChoice>() ?? []).Where(choice =>
+        choice.Parent is AlternateContent && choice.ChildElements.Any(element =>
+            (element.LocalName, element.NamespaceUri) is
+                ("sldZm", "http://schemas.microsoft.com/office/powerpoint/2016/slidezoom") or
+                ("sectionZm", "http://schemas.microsoft.com/office/powerpoint/2016/sectionzoom") or
+                ("summaryZm", "http://schemas.microsoft.com/office/powerpoint/2016/summaryzoom")));
+
 static IEnumerable<OpenXmlElement> JumpActions(OpenXmlPart part) =>
     (part.RootElement?.Descendants() ?? []).Where(element =>
     {
@@ -323,6 +343,7 @@ static IEnumerable<OpenXmlElement> JumpActions(OpenXmlPart part) =>
         var action = element.GetAttributes().FirstOrDefault(attribute => attribute.LocalName == "action").Value;
         return action is not null && (
             action.Equals("ppaction://hlinksldjump", StringComparison.OrdinalIgnoreCase) ||
+            action.StartsWith("ppaction://customshow?id=", StringComparison.OrdinalIgnoreCase) ||
             action.StartsWith("ppaction://hlinkpres?slideindex=", StringComparison.OrdinalIgnoreCase) ||
             (action.StartsWith("ppaction://hlinkshowjump?jump=", StringComparison.OrdinalIgnoreCase) &&
                 !action.EndsWith("=endshow", StringComparison.OrdinalIgnoreCase)));
@@ -541,6 +562,17 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
     }
 
     FitShapes(tree, left, top);
+    if (scale != 1)
+        foreach (var shape in tree.Descendants<Shape>())
+            if (shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is null &&
+                shape.TextBody?.BodyProperties is { } body)
+            {
+                // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted text box.
+                body.LeftInset ??= 91440;
+                body.RightInset ??= 91440;
+                body.TopInset ??= 45720;
+                body.BottomInset ??= 45720;
+            }
     ScaleText(tree, scale);
 }
 
