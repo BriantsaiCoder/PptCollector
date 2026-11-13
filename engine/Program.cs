@@ -566,16 +566,26 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
 
     FitShapes(tree, left, top);
     if (scale != 1)
+    {
+        // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted objects.
         foreach (var shape in tree.Descendants<Shape>())
             if (shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is null &&
                 shape.TextBody?.BodyProperties is { } body)
             {
-                // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted text box.
                 body.LeftInset ??= 91440;
                 body.RightInset ??= 91440;
                 body.TopInset ??= 45720;
                 body.BottomInset ??= 45720;
             }
+        foreach (var cell in tree.Descendants<Drawing.TableCell>())
+        {
+            var properties = cell.TableCellProperties ??= new Drawing.TableCellProperties();
+            properties.LeftMargin ??= 91440;
+            properties.RightMargin ??= 91440;
+            properties.TopMargin ??= 45720;
+            properties.BottomMargin ??= 45720;
+        }
+    }
     ScaleText(tree, scale);
 }
 

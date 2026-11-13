@@ -354,26 +354,26 @@ fn output_name(input: &str, security: bool) -> Result<String> {
                 )
             })
         });
-    let suffix = if security
-        && !stem
-            .to_ascii_lowercase()
-            .ends_with(&SUFFIX.to_ascii_lowercase())
-    {
-        SUFFIX
+    let has_security_suffix = stem
+        .get(stem.len().saturating_sub(SUFFIX.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX));
+    let name = if security && has_security_suffix {
+        &stem[..stem.len() - SUFFIX.len()]
     } else {
-        ""
+        stem
     };
+    let suffix = if security { SUFFIX } else { "" };
     if stem.is_empty()
         || stem.ends_with(['.', ' '])
         || reserved
-        || stem.len() + suffix.len() > 245
+        || name.len() + suffix.len() > 245
         || stem
             .chars()
             .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
     {
         return Err("請輸入可在 Mac 與 Windows 使用的檔名，例如「良率分析」。".into());
     }
-    Ok(format!("{stem}{suffix}.pptx"))
+    Ok(format!("{name}{suffix}.pptx"))
 }
 
 pub fn source_path(root: &Path, scan: &Scan, id: usize) -> Result<PathBuf> {

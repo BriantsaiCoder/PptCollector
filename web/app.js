@@ -29,8 +29,9 @@ function stem() {
 function outputPath() {
   if (!state.folder) return "存回所選資料夾";
   const separator = state.folder.includes("\\") ? "\\" : "/";
-  const name = stem() || "搜尋結果";
-  const suffix = securityName.checked && !name.toLowerCase().endsWith(SECURITY_SUFFIX.toLowerCase()) ? SECURITY_SUFFIX : "";
+  let name = stem() || "搜尋結果";
+  const suffix = securityName.checked ? SECURITY_SUFFIX : "";
+  if (suffix && name.toLowerCase().endsWith(suffix.toLowerCase())) name = name.slice(0, -suffix.length);
   return state.folder.replace(/[\\/]$/, "") + separator + name + suffix + ".pptx";
 }
 
