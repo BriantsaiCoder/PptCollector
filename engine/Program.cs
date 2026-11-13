@@ -231,13 +231,8 @@ static object Export(ExportRequest request)
                         foreach (var paragraph in textBody.Elements<Drawing.Paragraph>())
                         {
                             var level = paragraph.ParagraphProperties?.Level?.Value ?? 0;
-                            var masterSize = masterText?.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
-                                .FirstOrDefault(item => item.LocalName == $"lvl{level + 1}pPr")
-                                ?.GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize ??
-                                masterText?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
-                                    .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize;
-                            if (masterSize is not null || textBody.ListStyle?.Descendants<Drawing.DefaultRunProperties>()
-                                .Any(run => run.FontSize is not null) == true)
+                            if (FontSizeAtLevel(masterText, level) is not null ||
+                                FontSizeAtLevel(textBody.ListStyle, level) is not null)
                                 continue;
                             var properties = paragraph.ParagraphProperties ??= new Drawing.ParagraphProperties();
                             var defaults = properties.GetFirstChild<Drawing.DefaultRunProperties>();
@@ -442,6 +437,13 @@ static DefaultTextStyle? ScaledDefaults(DefaultTextStyle? source, double scale)
     ScaleText(clone, scale);
     return clone;
 }
+
+static Int32Value? FontSizeAtLevel(OpenXmlElement? styles, int level) =>
+    styles?.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+        .FirstOrDefault(item => item.LocalName == $"lvl{level + 1}pPr")
+        ?.GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize ??
+    styles?.GetFirstChild<Drawing.DefaultParagraphProperties>()?
+        .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize;
 
 static void MergeTextProperties(OpenXmlCompositeElement target, OpenXmlCompositeElement fallback)
 {
