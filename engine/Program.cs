@@ -160,15 +160,15 @@ static object Export(ExportRequest request)
                         var layoutTree = layoutPart.SlideLayout.CommonSlideData?.ShapeTree;
                         if (resize)
                             FitCanvas(layoutTree, size, targetSize, objectDefaults,
-                                master.SlideMaster.CommonSlideData?.ShapeTree);
+                                master: master.SlideMaster.CommonSlideData?.ShapeTree);
                         UpdateTableStyleReferences(layoutTree, styleIds);
                         layoutPart.SlideLayout.Save();
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
                     {
-                        FitCanvas(tree, size, targetSize, objectDefaults, layoutPart.SlideLayout.CommonSlideData?.ShapeTree,
-                            matchPlaceholderIndex: true);
+                        FitCanvas(tree, size, targetSize, objectDefaults,
+                            master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
                     }
@@ -496,7 +496,7 @@ static string NotesSignature(NotesMasterPart master)
 }
 
 static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
-    Drawing.ObjectDefaults? objectDefaults, ShapeTree? parent = null, bool matchPlaceholderIndex = false)
+    Drawing.ObjectDefaults? objectDefaults, ShapeTree? master = null, ShapeTree? layout = null)
 {
     if (tree is null)
         return;
@@ -577,14 +577,18 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
         {
             if (shape.TextBody?.BodyProperties is not { } body)
                 continue;
-            if (Placeholder(shape) is { } current && parent is not null &&
-                parent.Descendants<Shape>().Any(candidate =>
-                    candidate.TextBody?.BodyProperties is not null && Placeholder(candidate) is { } inherited &&
-                    (matchPlaceholderIndex
-                        ? (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0)
-                        : (current.Type?.Value ?? PlaceholderValues.Object) ==
-                          (inherited.Type?.Value ?? PlaceholderValues.Object))))
-                continue; // The parent already supplies scaled insets without overriding custom margins.
+            if (Placeholder(shape) is { } current)
+            {
+                var parent = layout?.Descendants<Shape>().FirstOrDefault(candidate =>
+                    Placeholder(candidate) is { } inherited &&
+                    (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0));
+                var masterType = MasterPlaceholderType(parent is null ? current : Placeholder(parent)!);
+                if (parent?.TextBody?.BodyProperties is not null ||
+                    master?.Descendants<Shape>().Any(candidate =>
+                        candidate.TextBody?.BodyProperties is not null &&
+                        Placeholder(candidate)?.Type?.Value == masterType) == true)
+                    continue; // Preserve inherited margins; their source has already been scaled.
+            }
             var isTextBox = shape.NonVisualShapeProperties?.NonVisualShapeDrawingProperties?.TextBox?.Value == true;
             OpenXmlElement? defaults = isTextBox ? objectDefaults?.TextDefault : objectDefaults?.ShapeDefault;
             var insets = defaults?.GetFirstChild<Drawing.BodyProperties>();
@@ -606,6 +610,16 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
 
     static PlaceholderShape? Placeholder(Shape shape) =>
         shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
+
+    static PlaceholderValues MasterPlaceholderType(PlaceholderShape placeholder)
+    {
+        var type = placeholder.Type?.Value;
+        if (type == PlaceholderValues.Title || type == PlaceholderValues.CenteredTitle)
+            return PlaceholderValues.Title;
+        if (type == PlaceholderValues.Footer || type == PlaceholderValues.SlideNumber || type == PlaceholderValues.DateAndTime)
+            return type.Value;
+        return PlaceholderValues.Body;
+    }
 }
 
 static double CanvasScale(SlideSize source, SlideSize target) =>
