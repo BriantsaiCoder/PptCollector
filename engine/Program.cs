@@ -142,11 +142,12 @@ static object Export(ExportRequest request)
                     var layoutPart = copy.SlideLayoutPart;
                     var master = layoutPart?.SlideMasterPart ??
                         throw new InvalidDataException($"{file.Label} 第 {page} 頁缺少母片。");
+                    var objectDefaults = resize ? master.ThemePart?.Theme.ObjectDefaults : null;
                     if (registeredMasters.Add(master.Uri))
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         if (resize)
-                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize);
+                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, objectDefaults);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
@@ -158,14 +159,16 @@ static object Export(ExportRequest request)
                     {
                         var layoutTree = layoutPart.SlideLayout.CommonSlideData?.ShapeTree;
                         if (resize)
-                            FitCanvas(layoutTree, size, targetSize);
+                            FitCanvas(layoutTree, size, targetSize, objectDefaults,
+                                master.SlideMaster.CommonSlideData?.ShapeTree);
                         UpdateTableStyleReferences(layoutTree, styleIds);
                         layoutPart.SlideLayout.Save();
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
                     {
-                        FitCanvas(tree, size, targetSize);
+                        FitCanvas(tree, size, targetSize, objectDefaults, layoutPart.SlideLayout.CommonSlideData?.ShapeTree,
+                            matchPlaceholderIndex: true);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
                     }
@@ -492,7 +495,8 @@ static string NotesSignature(NotesMasterPart master)
     return string.Join("\n", pieces);
 }
 
-static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
+static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
+    Drawing.ObjectDefaults? objectDefaults, ShapeTree? parent = null, bool matchPlaceholderIndex = false)
 {
     if (tree is null)
         return;
@@ -570,14 +574,25 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
     {
         // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted objects.
         foreach (var shape in tree.Descendants<Shape>())
-            if (shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is null &&
-                shape.TextBody?.BodyProperties is { } body)
-            {
-                body.LeftInset ??= 91440;
-                body.RightInset ??= 91440;
-                body.TopInset ??= 45720;
-                body.BottomInset ??= 45720;
-            }
+        {
+            if (shape.TextBody?.BodyProperties is not { } body)
+                continue;
+            if (Placeholder(shape) is { } current && parent is not null &&
+                parent.Descendants<Shape>().Any(candidate =>
+                    candidate.TextBody?.BodyProperties is not null && Placeholder(candidate) is { } inherited &&
+                    (matchPlaceholderIndex
+                        ? (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0)
+                        : (current.Type?.Value ?? PlaceholderValues.Object) ==
+                          (inherited.Type?.Value ?? PlaceholderValues.Object))))
+                continue; // The parent already supplies scaled insets without overriding custom margins.
+            var isTextBox = shape.NonVisualShapeProperties?.NonVisualShapeDrawingProperties?.TextBox?.Value == true;
+            OpenXmlElement? defaults = isTextBox ? objectDefaults?.TextDefault : objectDefaults?.ShapeDefault;
+            var insets = defaults?.GetFirstChild<Drawing.BodyProperties>();
+            body.LeftInset ??= insets?.LeftInset?.Value ?? 91440;
+            body.RightInset ??= insets?.RightInset?.Value ?? 91440;
+            body.TopInset ??= insets?.TopInset?.Value ?? 45720;
+            body.BottomInset ??= insets?.BottomInset?.Value ?? 45720;
+        }
         foreach (var cell in tree.Descendants<Drawing.TableCell>())
         {
             var properties = cell.TableCellProperties ??= new Drawing.TableCellProperties();
@@ -588,6 +603,9 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target)
         }
     }
     ScaleText(tree, scale);
+
+    static PlaceholderShape? Placeholder(Shape shape) =>
+        shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
 }
 
 static double CanvasScale(SlideSize source, SlideSize target) =>
