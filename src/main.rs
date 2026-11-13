@@ -4,9 +4,10 @@ mod core;
 
 use crate::core::{ExportOptions, Exported, Hit, Job, Result, Scan, display_path};
 use serde::Serialize;
+#[cfg(not(windows))]
+use std::process::Command;
 use std::{
     path::PathBuf,
-    process::Command,
     sync::{Arc, Mutex},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -215,14 +216,33 @@ async fn open_source(app: AppHandle, revision: u64, id: usize, folder: Option<bo
     tauri::async_runtime::spawn_blocking(move || {
         let path = core::source_path(&root, &scan, id)?;
         if folder == Some(true) {
-            let parent = path.parent().ok_or("找不到來源簡報所在的資料夾。")?;
-            open_path(parent, "來源資料夾")
+            open_source_folder(&path)
         } else {
             open_path(&path, "來源簡報")
         }
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn open_source_folder(path: &std::path::Path) -> Result<()> {
+    // Reveal the file so Finder opens its parent even inside a package.
+    let status = Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("無法開啟來源資料夾：{error}"))?;
+    if !status.success() {
+        return Err("無法開啟來源資料夾。".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_source_folder(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().ok_or("找不到來源簡報所在的資料夾。")?;
+    open_path(parent, "來源資料夾")
 }
 
 #[cfg(not(windows))]
