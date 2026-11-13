@@ -69,10 +69,6 @@
         <summary id="issue-summary"></summary>
         <ul id="issue-list"></ul>
       </details>
-      <div id="size-panel" class="size-panel" hidden>
-        <label for="size-select">依尺寸勾選</label>
-        <select id="size-select"><option value="">選擇相同尺寸</option></select>
-      </div>
       <div id="empty" class="empty">
         <div class="empty-mark" aria-hidden="true"><i></i><i></i><i></i></div>
         <p id="empty-title">先選資料夾，再輸入關鍵字</p>
@@ -103,11 +99,6 @@
       <div class="export-actions">
         <button id="export" type="submit" class="primary" disabled>匯出 .pptx</button>
         <button id="open" type="button" class="secondary" hidden>開啟輸出資料夾</button>
-      </div>
-      <div id="canvas-panel" hidden>
-        <label for="canvas">輸出尺寸</label>
-        <select id="canvas" aria-describedby="canvas-hint"></select>
-        <span id="canvas-hint" class="hint">其他尺寸的物件會等比例縮放並置中。圖表或背景可能有差異；動畫路徑不會調整。</span>
       </div>
       <p id="output-path" class="hint" tabindex="0">存回所選資料夾</p>
     </form>

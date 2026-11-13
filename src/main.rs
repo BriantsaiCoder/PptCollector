@@ -166,7 +166,6 @@ async fn export(
     ids: Vec<usize>,
     name: String,
     security_name: bool,
-    canvas: Option<(u32, u32)>,
 ) -> Result<Exported> {
     let active = ActiveJob::begin(&app, true)?;
     let scan = {
@@ -188,7 +187,7 @@ async fn export(
             &name,
             ExportOptions {
                 security_name,
-                canvas,
+                ..Default::default()
             },
             &active.job,
         )?;

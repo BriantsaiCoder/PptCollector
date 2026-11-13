@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -88,6 +89,7 @@ static object Export(ExportRequest request)
 {
     if (request.Canvas is not null and not [> 0, > 0])
         throw new InvalidDataException("輸出尺寸無效。");
+    var adjustedNotes = 0;
     using (var outputStream = new FileStream(request.Path, FileMode.Truncate, FileAccess.ReadWrite))
     using (var output = PresentationDocument.Create(outputStream, PresentationDocumentType.Presentation))
     {
@@ -128,8 +130,6 @@ static object Export(ExportRequest request)
                 }
                 var targetSize = destination.Presentation.SlideSize;
                 var resize = size.Cx!.Value != targetSize.Cx!.Value || size.Cy!.Value != targetSize.Cy!.Value;
-                if (resize && request.Canvas is null)
-                    throw new InvalidDataException($"{file.Label} 的投影片尺寸不同，請選擇輸出尺寸。");
                 var scale = CanvasScale(size, targetSize);
                 var sourceTableStyles = origin.TableStylesPart?.TableStyleList;
                 var styleIds = CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, scale);
@@ -150,7 +150,7 @@ static object Export(ExportRequest request)
                 var notesStyleIds = scale != 1 && file.Pages.Any(page => sourceSlides[page - 1].NotesSlidePart is not null)
                     ? CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, 1)
                     : styleIds;
-                var sourceNotesSignatures = new Dictionary<Uri, string>();
+                var adjustedNotesMasters = new Dictionary<Uri, bool>();
                 CopyEmbeddedFonts(origin, destination, embeddedFonts, file.Label);
 
                 foreach (var page in file.Pages)
@@ -214,26 +214,31 @@ static object Export(ExportRequest request)
                             notesMaster = destination.AddPart(copiedMaster);
                             notesSource = file.Path;
                             notesSourceMaster = originalMaster;
-                            if (origin.Presentation.NotesSize is { } notesSize)
-                                destination.Presentation.NotesSize = (NotesSize)notesSize.CloneNode(true);
+                            destination.Presentation.NotesSize = origin.Presentation.NotesSize is { } notesSize
+                                ? (NotesSize)notesSize.CloneNode(true)
+                                : new NotesSize { Cx = 6858000, Cy = 9144000 };
                             destination.Presentation.NotesMasterIdList = new NotesMasterIdList(
                                 new NotesMasterId { Id = destination.GetIdOfPart(notesMaster) });
                         }
                         else if (notesMaster.Uri != copiedMaster.Uri)
                         {
-                            if (notesSource != file.Path || notesSourceMaster != originalMaster)
+                            if (!adjustedNotesMasters.TryGetValue(originalMaster, out var adjusted))
                             {
-                                notesSignature ??= NotesSignature(notesMaster, Path.GetFileName(notesSource));
-                                if (!sourceNotesSignatures.TryGetValue(originalMaster, out var sourceSignature))
+                                if (notesSource != file.Path || notesSourceMaster != originalMaster)
                                 {
-                                    sourceSignature = NotesSignature(copiedMaster, file.Label);
-                                    sourceNotesSignatures.Add(originalMaster, sourceSignature);
+                                    notesSignature ??= NotesSignature(notesMaster);
+                                    var sourceSignature = NotesSignature(copiedMaster);
+                                    var sourceSize = origin.Presentation.NotesSize;
+                                    var targetNotesSize = destination.Presentation.NotesSize;
+                                    adjusted = sourceSignature is null || notesSignature != sourceSignature ||
+                                        (sourceSize?.Cx?.Value ?? 6858000) != targetNotesSize?.Cx?.Value ||
+                                        (sourceSize?.Cy?.Value ?? 9144000) != targetNotesSize?.Cy?.Value;
                                 }
-                                var notesSize = origin.Presentation.NotesSize;
-                                if (notesSignature != sourceSignature ||
-                                    (notesSize is not null && FormatKey(notesSize) != FormatKey(destination.Presentation.NotesSize)))
-                                    throw new InvalidDataException($"{file.Label} 的備忘稿母片或尺寸不同，請分開匯出以保留備忘稿樣式。");
+                                adjustedNotesMasters.Add(originalMaster, adjusted);
                             }
+                            // A .pptx has one notes master. Keep each editable notes page and use the shared master.
+                            if (adjusted)
+                                adjustedNotes++;
                             var id = linkedNotes.GetIdOfPart(copiedMaster);
                             linkedNotes.DeletePart(copiedMaster);
                             linkedNotes.AddPart(notesMaster, id);
@@ -356,7 +361,8 @@ static object Export(ExportRequest request)
     var invalid = new OpenXmlValidator(FileFormatVersions.Office2021).Validate(saved).FirstOrDefault();
     if (invalid is not null)
         throw new InvalidDataException($"輸出檔未通過 PowerPoint 結構檢查。{invalid.Part?.Uri}：{invalid.Description}");
-    return new { count };
+    var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+    return new { count, adjustedNotes, timestamp };
 }
 
 static FileStream? PrepareSource(FileStream source, int[] pages)
@@ -649,10 +655,11 @@ static bool UpdateTableStyleReferences(OpenXmlElement? content, Dictionary<strin
     return changed;
 }
 
-static string NotesSignature(NotesMasterPart master, string? label)
+static string? NotesSignature(NotesMasterPart master)
 {
     var seen = new Dictionary<Uri, int>();
     var pieces = new List<string>();
+    var comparable = true;
     void Add(OpenXmlPart part)
     {
         if (seen.TryGetValue(part.Uri, out var index))
@@ -674,10 +681,10 @@ static string NotesSignature(NotesMasterPart master, string? label)
         foreach (var rel in part.HyperlinkRelationships.OrderBy(rel => rel.Id, StringComparer.Ordinal))
             pieces.Add($"{rel.Id}:{rel.IsExternal}:{rel.Uri}");
         if (part.DataPartReferenceRelationships.Any())
-            throw new InvalidDataException($"{label} 的備忘稿母片含有無法比對的媒體關聯。");
+            comparable = false;
     }
     Add(master);
-    return string.Join("\n", pieces);
+    return comparable ? string.Join("\n", pieces) : null;
 }
 
 static PlaceholderShape? ShapePlaceholder(Shape shape) =>
