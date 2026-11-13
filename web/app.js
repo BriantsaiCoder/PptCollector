@@ -162,6 +162,7 @@ function showSourceMenu(revision, id, trigger, x, y) {
 }
 
 for (const [index, action] of sourceActions.entries()) {
+  action.addEventListener("pointermove", () => action.focus({ preventScroll: true }));
   action.addEventListener("click", () => {
     if (!menuSource) return;
     const { revision, id } = menuSource;

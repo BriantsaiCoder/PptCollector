@@ -149,7 +149,7 @@ td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue)
   display: block; width: 100%; padding: 7px 10px; text-align: left;
   border: 0; border-radius: 4px; background: none;
 }
-#source-menu button:hover, #source-menu button:focus { background: var(--tint); }
+#source-menu button:focus { background: var(--tint); }
 #source-menu button:focus-visible { outline-offset: -2px; }
 .row-detail, .snippet { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 2px; }
 .matched { color: #1b439c; font-size: 12px; font-weight: 650; }
