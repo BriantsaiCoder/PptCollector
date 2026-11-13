@@ -396,6 +396,7 @@ pub fn source_path(root: &Path, scan: &Scan, id: usize) -> Result<PathBuf> {
 pub struct Exported {
     pub path: String,
     pub count: usize,
+    pub adjusted_notes: usize,
 }
 
 #[derive(Default)]
@@ -423,20 +424,12 @@ pub fn export(
     let mut ids = ids;
     ids.sort_unstable();
     ids.dedup();
-    let mut dimensions = None;
     let mut canvas_found = false;
     let mut files: Vec<(&Source, Vec<u32>)> = Vec::new();
     for id in ids {
         let hit = scan.hits.get(id).ok_or("搜尋結果已過期，請重新搜尋。")?;
         let source = &scan.sources[id];
         let size = (hit.width, hit.height);
-        if options.canvas.is_none() && dimensions.is_some_and(|expected| expected != size) {
-            return Err(format!(
-                "尺寸不同：{} 第 {} 頁。請只勾選相同尺寸的投影片。",
-                hit.path, hit.page
-            ));
-        }
-        dimensions = Some(size);
         canvas_found |= options.canvas == Some(size);
         match files.last_mut() {
             Some((previous, pages)) if previous.path == source.path => pages.push(hit.page),
@@ -462,8 +455,11 @@ pub fn export(
     }).collect();
     let temp_name = temp.to_str().ok_or("輸出資料夾路徑不是有效的 Unicode。")?;
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Report {
         count: usize,
+        #[serde(default)]
+        adjusted_notes: usize,
     }
     let report = Engine::start(engine, job)?.request::<Report>(json!({
         "kind": "export", "path": temp_name, "files": sources?, "canvas": options.canvas
@@ -479,5 +475,6 @@ pub fn export(
     Ok(Exported {
         path: display_path(&target),
         count: report.count,
+        adjusted_notes: report.adjusted_notes,
     })
 }

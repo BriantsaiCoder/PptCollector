@@ -6,7 +6,6 @@ const state = { folder: "", terms: [], phase: "", scan: null, selected: new Set(
 const field = byId("term");
 const fileName = byId("name");
 const securityName = byId("security-name");
-const canvas = byId("canvas");
 const radios = [...document.querySelectorAll("input[name=mode]")];
 
 function notify(text, kind = "") {
@@ -42,7 +41,6 @@ function updateButtons() {
   field.disabled = busy;
   fileName.disabled = busy;
   securityName.disabled = busy;
-  canvas.disabled = busy;
   for (const radio of radios) radio.disabled = busy;
   for (const chip of byId("chips").querySelectorAll("button")) chip.disabled = busy;
   byId("add").disabled = busy || !field.value.trim();
@@ -52,10 +50,9 @@ function updateButtons() {
   byId("cancel").disabled = state.phase === "cancel";
   byId("cancel").textContent = state.phase === "cancel" ? "正在取消…" : "取消搜尋";
   byId("toggle").disabled = busy;
-  byId("size-select").disabled = busy;
   byId("open").hidden = !state.exported;
   byId("open").disabled = busy;
-  byId("export").disabled = busy || !state.selected.size || !stem() || (!byId("canvas-panel").hidden && !canvas.value);
+  byId("export").disabled = busy || !state.selected.size || !stem();
   byId("export").textContent = state.phase === "export" ? "匯出中…" : "匯出 .pptx";
   const checks = byId("rows").querySelectorAll("input[type=checkbox]");
   for (const check of checks) check.disabled = busy;
@@ -106,28 +103,8 @@ function drawChips() {
   }
 }
 
-function sizeKey(hit) {
-  return `${hit.width}:${hit.height}`;
-}
-
-function sizeLabel(hit) {
-  const centimeters = emu => (emu / 360000).toFixed(2);
-  return `${centimeters(hit.width)} × ${centimeters(hit.height)} cm`;
-}
-
 function drawResults() {
   const found = state.scan?.hits || [];
-  const sizes = new Map();
-  for (const hit of found) {
-    const key = sizeKey(hit);
-    const entry = sizes.get(key) || { name: sizeLabel(hit), count: 0 };
-    entry.count += 1;
-    sizes.set(key, entry);
-  }
-  const sizesSelect = byId("size-select");
-  sizesSelect.replaceChildren(new Option("選擇相同尺寸", ""));
-  for (const [key, size] of sizes) sizesSelect.add(new Option(`${size.name}（${size.count} 張）`, key));
-  byId("size-panel").hidden = sizes.size < 2;
   byId("empty").hidden = found.length > 0;
   byId("table-wrap").hidden = !found.length;
   byId("pages").hidden = found.length <= PAGE_SIZE;
@@ -171,7 +148,6 @@ function drawPage() {
     check.addEventListener("change", () => {
       if (check.checked) state.selected.add(hit.id);
       else state.selected.delete(hit.id);
-      byId("size-select").value = "";
       updateSelection();
     });
     row.insertCell().append(check);
@@ -199,19 +175,9 @@ function drawPage() {
 
 function updateSelection() {
   const found = state.scan?.hits || [];
-  const sizes = new Map(found.filter(hit => state.selected.has(hit.id)).map(hit => [sizeKey(hit), sizeLabel(hit)]));
-  const previous = canvas.value;
-  byId("canvas-panel").hidden = sizes.size < 2;
-  if (sizes.size > 1) {
-    canvas.replaceChildren(new Option("請選擇輸出尺寸", ""));
-    for (const [key, label] of sizes) canvas.add(new Option(label, key));
-    canvas.value = sizes.has(previous) ? previous : "";
-  } else if (sizes.size < 2) {
-    canvas.replaceChildren();
-  }
   byId("toggle").textContent = state.selected.size === found.length ? "取消全選" : "全選";
   byId("selection").textContent = state.selected.size
-    ? `已選 ${state.selected.size} 張${sizes.size > 1 ? " · 尺寸不同" : ""}`
+    ? `已選 ${state.selected.size} 張`
     : "尚未選取投影片";
   updateButtons();
 }
@@ -293,22 +259,14 @@ byId("toggle").addEventListener("click", () => {
   if (!state.scan) return;
   state.selected = state.selected.size === state.scan.hits.length
     ? new Set() : new Set(state.scan.hits.map(hit => hit.id));
-  byId("size-select").value = "";
   drawPage();
 });
 
-byId("size-select").addEventListener("change", event => {
-  const size = event.target.value;
-  if (!size || !state.scan) return;
-  state.selected = new Set(state.scan.hits.filter(hit => sizeKey(hit) === size).map(hit => hit.id));
-  drawPage();
-});
 byId("previous").addEventListener("click", () => { state.page -= 1; drawPage(); });
 byId("next").addEventListener("click", () => { state.page += 1; drawPage(); });
 fileName.addEventListener("input", updateSelection);
 fileName.addEventListener("blur", () => { fileName.value = stem(); updateSelection(); });
 securityName.addEventListener("change", updateButtons);
-canvas.addEventListener("change", updateButtons);
 
 byId("export-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -320,10 +278,13 @@ byId("export-form").addEventListener("submit", async event => {
   try {
     const result = await invoke("export", {
       revision: state.scan.revision, ids: [...state.selected], name: fileName.value,
-      securityName: securityName.checked, canvas: canvas.value ? canvas.value.split(":").map(Number) : null,
+      securityName: securityName.checked,
     });
     state.exported = true;
-    notify(`已匯出 ${result.count} 張投影片。`, "success");
+    const notes = result.adjusted_notes
+      ? `有 ${result.adjusted_notes} 張的備忘稿沿用統一版型，內容仍可編輯。`
+      : "";
+    notify(`已匯出 ${result.count} 張投影片。${notes}`, "success");
   } catch (error) { notify(errorText(error), "error"); }
   finally { state.phase = ""; updateSelection(); }
 });

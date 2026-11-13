@@ -124,14 +124,12 @@ progress { width: 100%; height: 8px; accent-color: var(--blue); }
 .empty-mark i:nth-child(2) { width: 77%; }
 .empty-mark i:nth-child(3) { width: 55%; }
 #empty-title { font-weight: 650; }
-.notice, .issues, .size-panel { flex: none; margin: 0 18px 10px; border-radius: 8px; padding: 9px 10px; overflow-wrap: anywhere; }
+.notice, .issues { flex: none; margin: 0 18px 10px; border-radius: 8px; padding: 9px 10px; overflow-wrap: anywhere; }
 .notice { max-height: 5em; overflow: auto; }
 .notice { color: #183d93; background: var(--tint); }
 .notice.error, .issues { color: var(--warning); background: var(--warning-tint); }
 .notice.success { color: #155336; background: #eaf7ef; }
 .issues ul { margin: 8px 0 0; padding-left: 20px; max-height: min(110px, 15vh); overflow: auto; }
-.size-panel { background: #f4f7fc; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.size-panel select { min-height: 32px; padding-block: 4px; }
 .table-wrap { min-height: 0; flex: 1; overflow: auto; border-top: 1px solid var(--line); }
 table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 th { position: sticky; top: 0; text-align: left; background: #f3f6fb; color: var(--muted); font-size: 12px; z-index: 1; }
@@ -153,8 +151,6 @@ td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue)
 .output-field .suffix-field { margin-top: 3px; }
 .security-option { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; }
 .security-option input { margin: 0; accent-color: var(--blue); }
-#canvas-panel { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-#canvas { min-height: 30px; padding-block: 2px; }
 .export-actions { display: flex; align-items: center; gap: 8px; }
 .export-bar .primary { min-height: 40px; }
 #output-path { grid-column: 1 / -1; overflow-wrap: anywhere; max-height: 3.1em; overflow: auto; }
