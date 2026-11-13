@@ -267,14 +267,22 @@ static object Export(ExportRequest request)
                         styleForShape = inherited;
                     }
                     body.ListStyle ??= new Drawing.ListStyle();
-                    if (body.ListStyle.GetFirstChild<Drawing.DefaultParagraphProperties>()?
-                        .GetFirstChild<Drawing.DefaultRunProperties>()?.FontSize?.Value is { } localSize)
+                    if (body.ListStyle.GetFirstChild<Drawing.DefaultParagraphProperties>() is { } localDefault)
                     {
-                        // A newly added level must not replace an explicit local default size.
-                        styleForShape = (OpenXmlCompositeElement)styleForShape.CloneNode(true);
-                        foreach (var level in styleForShape.ChildElements.OfType<Drawing.TextParagraphPropertiesType>())
-                            if (level.GetFirstChild<Drawing.DefaultRunProperties>() is { } propertiesAtLevel)
-                                propertiesAtLevel.FontSize = localSize;
+                        // Existing local levels win; fill inherited levels using local defaults first.
+                        foreach (var inheritedLevel in styleForShape.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+                            .Where(level => level is not Drawing.DefaultParagraphProperties))
+                        {
+                            var level = body.ListStyle.ChildElements.OfType<Drawing.TextParagraphPropertiesType>()
+                                .FirstOrDefault(item => item.GetType() == inheritedLevel.GetType());
+                            if (level is null)
+                            {
+                                level = (Drawing.TextParagraphPropertiesType)inheritedLevel.CloneNode(false);
+                                level.ClearAllAttributes();
+                                body.ListStyle.AddChild(level);
+                            }
+                            MergeTextProperties(level, localDefault);
+                        }
                     }
                     MergeTextProperties(body.ListStyle, styleForShape);
                 }
