@@ -146,14 +146,14 @@ static object Export(ExportRequest request)
                     var layoutPart = copy.SlideLayoutPart;
                     var master = layoutPart?.SlideMasterPart ??
                         throw new InvalidDataException($"{file.Label} 第 {page} 頁缺少母片。");
-                    var masterLines = resize ? master.ThemePart?.Theme.ThemeElements?.FormatScheme?.LineStyleList : null;
+                    var masterStyle = resize ? master.ThemePart?.Theme.ThemeElements?.FormatScheme : null;
                     if (registeredMasters.Add(master.Uri))
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         shapeDefaults.Add((master.SlideMaster.CommonSlideData?.ShapeTree, master.SlideMaster, master,
                             origin.Presentation.DefaultTextStyle, scale, null));
                         if (resize)
-                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, masterLines);
+                            FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, masterStyle);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
@@ -165,7 +165,7 @@ static object Export(ExportRequest request)
                             var layoutTree = layout.SlideLayout.CommonSlideData?.ShapeTree;
                             if (resize)
                                 FitCanvas(layoutTree, size, targetSize,
-                                    layout.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ?? masterLines,
+                                    layout.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle,
                                     master: master.SlideMaster.CommonSlideData?.ShapeTree);
                             UpdateTableStyleReferences(layoutTree, styleIds);
                             layout.SlideLayout.Save();
@@ -176,8 +176,8 @@ static object Export(ExportRequest request)
                     if (resize)
                     {
                         FitCanvas(tree, size, targetSize,
-                            copy.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ??
-                            layoutPart!.ThemeOverridePart?.ThemeOverride.FormatScheme?.LineStyleList ?? masterLines,
+                            copy.ThemeOverridePart?.ThemeOverride.FormatScheme ??
+                            layoutPart!.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle,
                             master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart!.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
@@ -668,7 +668,7 @@ static void ScaleLineWidths(OpenXmlElement tree, double scale)
             line.Width = (int)Math.Clamp(Math.Round(widthEmu * scale), 0, 20116800);
 }
 
-static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawing.LineStyleList? themeLines,
+static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawing.FormatScheme? themeStyle,
     ShapeTree? master = null, ShapeTree? layout = null)
 {
     if (tree is null)
@@ -708,17 +708,44 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
                     FitShapes(branch, dx, dy);
                 continue;
             }
-            // Keep theme colors and effects; only make the inherited width local for scaling.
-            if (scale != 1 && themeLines is not null &&
-                shape.GetFirstChild<ShapeStyle>()?.LineReference?.Index?.Value is > 0 and <= int.MaxValue and var index &&
-                shape.GetFirstChild<ShapeProperties>() is { } properties &&
-                themeLines.Elements<Drawing.Outline>().ElementAtOrDefault((int)index - 1)?.Width?.Value is { } inheritedWidth)
+            if (scale != 1 && themeStyle is not null &&
+                shape.GetFirstChild<ShapeStyle>() is { } style &&
+                shape.GetFirstChild<ShapeProperties>() is { } properties)
             {
-                var outline = properties.GetFirstChild<Drawing.Outline>();
-                if (outline is null)
-                    properties.AddChild(new Drawing.Outline { Width = inheritedWidth });
-                else if (outline.Width is null)
-                    outline.Width = inheritedWidth;
+                // Keep the theme intact for other parts such as notes.
+                if (style.LineReference?.Index?.Value is > 0 and <= int.MaxValue and var lineIndex &&
+                    themeStyle.LineStyleList?.Elements<Drawing.Outline>().ElementAtOrDefault((int)lineIndex - 1)?.Width?.Value
+                        is { } inheritedWidth)
+                {
+                    var outline = properties.GetFirstChild<Drawing.Outline>();
+                    if (outline is null)
+                        properties.AddChild(new Drawing.Outline { Width = inheritedWidth });
+                    else if (outline.Width is null)
+                        outline.Width = inheritedWidth;
+                }
+                if (style.EffectReference is { } reference &&
+                    reference.Index?.Value is > 0 and <= int.MaxValue and var effectIndex &&
+                    properties.GetFirstChild<Drawing.EffectList>() is null &&
+                    properties.GetFirstChild<Drawing.EffectDag>() is null &&
+                    themeStyle.EffectStyleList?.Elements<Drawing.EffectStyle>().ElementAtOrDefault((int)effectIndex - 1)
+                        is { } inheritedStyle &&
+                    inheritedStyle.ChildElements.FirstOrDefault(child => child is Drawing.EffectList or Drawing.EffectDag)
+                        is { } inheritedEffects && inheritedEffects.Descendants().Any(effect => EffectLengths(effect).Length > 0))
+                {
+                    var effects = inheritedEffects.CloneNode(true);
+                    // phClr in a matrix effect uses the color supplied by this shape's effectRef.
+                    if (reference.FirstChild is OpenXmlCompositeElement referenceColor)
+                        foreach (var placeholder in effects.Descendants<Drawing.SchemeColor>()
+                            .Where(color => color.Val?.Value == Drawing.SchemeColorValues.PhColor).ToArray())
+                        {
+                            var color = (OpenXmlCompositeElement)referenceColor.CloneNode(true);
+                            foreach (var modifier in placeholder.ChildElements)
+                                color.AppendChild(modifier.CloneNode(true));
+                            placeholder.InsertAfterSelf(color);
+                            placeholder.Remove();
+                        }
+                    properties.AddChild(effects);
+                }
             }
             Move(shape switch
             {
@@ -759,6 +786,7 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
     ScaleLineWidths(tree, scale);
     if (scale != 1)
     {
+        ScaleEffectDistances(tree, scale);
         // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted objects.
         foreach (var shape in tree.Descendants<Shape>())
         {
@@ -798,6 +826,29 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
         if (type == PlaceholderValues.Footer || type == PlaceholderValues.SlideNumber || type == PlaceholderValues.DateAndTime)
             return type.Value;
         return PlaceholderValues.Body;
+    }
+}
+
+static string[] EffectLengths(OpenXmlElement effect) => effect switch
+{
+    Drawing.OuterShadow or Drawing.InnerShadow or Drawing.Reflection => ["dist", "blurRad"],
+    Drawing.Blur or Drawing.Glow or Drawing.SoftEdge => ["rad"],
+    _ => [],
+};
+
+static void ScaleEffectDistances(OpenXmlElement root, double scale)
+{
+    foreach (var effect in root.Descendants())
+    foreach (var name in EffectLengths(effect))
+    {
+        var attribute = effect.GetAttributes().FirstOrDefault(candidate =>
+            candidate.NamespaceUri.Length == 0 && candidate.LocalName == name);
+        if (!long.TryParse(attribute.Value, out var value))
+            continue;
+        // DrawingML positive coordinates use this upper bound for absolute effect lengths.
+        var fitted = (long)Math.Clamp(Math.Round(value * scale), 0, 27273042316900);
+        effect.SetAttribute(new OpenXmlAttribute(name, "",
+            fitted.ToString(System.Globalization.CultureInfo.InvariantCulture)));
     }
 }
 
