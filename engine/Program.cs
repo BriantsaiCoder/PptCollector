@@ -98,7 +98,7 @@ static object Export(ExportRequest request)
         uint slideId = 256, layoutId = 0x80000000;
         var registeredLayouts = new HashSet<Uri>();
         var textDefaults = new List<(SlideMasterPart Part, DefaultTextStyle? Style, double Scale)>();
-        var slideDefaults = new List<(SlidePart Part, DefaultTextStyle? Style, double Scale)>();
+        var shapeDefaults = new List<(ShapeTree? Tree, OpenXmlPartRootElement Root, SlideMasterPart Master, DefaultTextStyle? Style, double Scale)>();
         var tableStyles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var embeddedFonts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var registeredMasters = new HashSet<Uri>();
@@ -130,8 +130,7 @@ static object Export(ExportRequest request)
                 if (resize && request.Canvas is null)
                     throw new InvalidDataException($"{file.Label} 的投影片尺寸不同，請選擇輸出尺寸。");
                 var scale = CanvasScale(size, targetSize);
-                var sourceTableStyles = origin.TableStylesPart?.TableStyleList;
-                var styleIds = CopyTableStyles(sourceTableStyles, destination, tableStyles);
+                var styleIds = CopyTableStyles(origin.TableStylesPart?.TableStyleList, destination, tableStyles, file.Label);
                 string? sourceNotesSignature = null;
                 CopyEmbeddedFonts(origin, destination, embeddedFonts, file.Label);
 
@@ -146,6 +145,8 @@ static object Export(ExportRequest request)
                     if (registeredMasters.Add(master.Uri))
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
+                        shapeDefaults.Add((master.SlideMaster.CommonSlideData?.ShapeTree, master.SlideMaster, master,
+                            origin.Presentation.DefaultTextStyle, scale));
                         if (resize)
                             FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, objectDefaults);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
@@ -163,6 +164,7 @@ static object Export(ExportRequest request)
                                 master: master.SlideMaster.CommonSlideData?.ShapeTree);
                         UpdateTableStyleReferences(layoutTree, styleIds);
                         layoutPart.SlideLayout.Save();
+                        shapeDefaults.Add((layoutTree, layoutPart.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale));
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
@@ -174,7 +176,7 @@ static object Export(ExportRequest request)
                     }
                     UpdateTableStyleReferences(tree, styleIds);
                     copy.Slide.Save();
-                    slideDefaults.Add((copy, origin.Presentation.DefaultTextStyle, scale));
+                    shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale));
                     if (copy.NotesSlidePart is { NotesMasterPart: { } copiedMaster } notes)
                     {
                         if (notesMaster is null)
@@ -214,26 +216,27 @@ static object Export(ExportRequest request)
                 ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale));
                 part.SlideMaster.Save();
             }
-            foreach (var (part, style, scale) in slideDefaults)
+            foreach (var (tree, root, master, style, scale) in shapeDefaults)
             {
-                if (style is null)
+                if (tree is null || style is null)
                     continue;
                 var scaled = ScaledDefaults(style, scale)!;
-                var tree = part.Slide.CommonSlideData?.ShapeTree;
-                if (tree is null)
-                    continue;
+                var shapeStyle = new Drawing.ListStyle();
+                if (master.SlideMaster.TextStyles?.OtherStyle is { } other)
+                    foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
+                        shapeStyle.AddChild(level.CloneNode(true));
+                MergeTextProperties(shapeStyle, scaled);
                 foreach (var shape in tree.Descendants<Shape>())
                 {
                     var properties = shape.NonVisualShapeProperties;
-                    // Free text boxes use presentation defaults; regular shapes already inherit the master style.
-                    if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true ||
-                        properties.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
+                    if (properties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
                         shape.TextBody is not { } body)
                         continue;
                     body.ListStyle ??= new Drawing.ListStyle();
-                    MergeTextProperties(body.ListStyle, scaled);
+                    MergeTextProperties(body.ListStyle,
+                        properties?.NonVisualShapeDrawingProperties?.TextBox?.Value == true ? scaled : shapeStyle);
                 }
-                part.Slide.Save();
+                root.Save();
             }
         }
         else
@@ -375,8 +378,8 @@ static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults)
     var styles = master.TextStyles;
     styles.TitleStyle ??= new TitleStyle();
     styles.BodyStyle ??= new BodyStyle();
-    styles.OtherStyle ??= new OtherStyle();
-    foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle, styles.OtherStyle })
+    // OtherStyle also controls table text. Keep its own defaults rather than applying text box defaults to cells.
+    foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
         MergeTextProperties(style, defaults);
 }
 
@@ -427,30 +430,40 @@ static string? TextPropertyChoice(string name) => name switch
 };
 
 static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source,
-    PresentationPart target, Dictionary<string, string> seen)
+    PresentationPart target, Dictionary<string, string> seen, string label)
 {
     var remap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     if (source is null)
         return remap;
+    var definitions = source.Elements<Drawing.TableStyleEntry>().ToArray();
+    if (definitions.Length == 0)
+        return remap;
     var targetPart = target.TableStylesPart ?? target.AddNewPart<TableStylesPart>();
     targetPart.TableStyleList ??= new Drawing.TableStyleList { Default = source.Default?.Value };
-    foreach (var style in source.Elements<Drawing.TableStyleEntry>())
+    foreach (var style in definitions)
     {
         var id = style.StyleId?.Value ?? throw new InvalidDataException("來源表格樣式缺少識別碼。");
+        // The Table Styles package part cannot own image relationships.
+        if (style.Descendants<Drawing.Blip>().Any(blip => blip.Embed is not null || blip.Link is not null))
+            throw new InvalidDataException($"{label} 的表格樣式使用了不支援的外部圖片關聯。");
         var signature = FormatKey(style)!;
-        if (seen.TryGetValue(id, out var previous))
+        var key = id.ToUpperInvariant() + "\n" + signature;
+        if (seen.TryGetValue(key, out var priorId))
         {
-            if (previous == signature)
-                continue;
-            var newId = Guid.NewGuid().ToString("B").ToUpperInvariant();
-            remap.Add(id, newId);
-            id = newId;
+            remap.Add(id, priorId);
+            continue;
         }
-        seen.Add(id, signature);
+        // Keep the built-in style IDs available for sources with no custom definition.
+        var newId = Guid.NewGuid().ToString("B").ToUpperInvariant();
+        remap.Add(id, newId);
+        id = newId;
+        seen.Add(key, id);
         var clone = (Drawing.TableStyleEntry)style.CloneNode(true);
         clone.StyleId = id;
         targetPart.TableStyleList.AppendChild(clone);
     }
+    if (targetPart.TableStyleList.Default?.Value is { } defaultId && remap.TryGetValue(defaultId, out var mapped))
+        targetPart.TableStyleList.Default = mapped;
     targetPart.TableStyleList.Save();
     return remap;
 }
