@@ -96,7 +96,6 @@ static object Export(ExportRequest request)
         var slides = new SlideIdList();
         destination.Presentation = new Presentation(masters, slides);
         uint slideId = 256, layoutId = 0x80000000;
-        var registeredLayouts = new HashSet<Uri>();
         var textDefaults = new List<(SlideMasterPart Part, DefaultTextStyle? Style, double Scale)>();
         var shapeDefaults = new List<(ShapeTree? Tree, OpenXmlPartRootElement Root, SlideMasterPart Master, DefaultTextStyle? Style, double Scale)>();
         var tableStyles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -155,22 +154,22 @@ static object Export(ExportRequest request)
                         foreach (var layout in master.SlideMaster.SlideLayoutIdList!.Elements<SlideLayoutId>())
                             layout.Id = layoutId++;
                         master.SlideMaster.Save();
-                    }
-                    if (registeredLayouts.Add(layoutPart!.Uri))
-                    {
-                        var layoutTree = layoutPart.SlideLayout.CommonSlideData?.ShapeTree;
-                        if (resize)
-                            FitCanvas(layoutTree, size, targetSize, objectDefaults,
-                                master: master.SlideMaster.CommonSlideData?.ShapeTree);
-                        UpdateTableStyleReferences(layoutTree, styleIds);
-                        layoutPart.SlideLayout.Save();
-                        shapeDefaults.Add((layoutTree, layoutPart.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale));
+                        foreach (var layout in master.SlideLayoutParts)
+                        {
+                            var layoutTree = layout.SlideLayout.CommonSlideData?.ShapeTree;
+                            if (resize)
+                                FitCanvas(layoutTree, size, targetSize, objectDefaults,
+                                    master: master.SlideMaster.CommonSlideData?.ShapeTree);
+                            UpdateTableStyleReferences(layoutTree, styleIds);
+                            layout.SlideLayout.Save();
+                            shapeDefaults.Add((layoutTree, layout.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale));
+                        }
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
                     if (resize)
                     {
                         FitCanvas(tree, size, targetSize, objectDefaults,
-                            master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart.SlideLayout.CommonSlideData?.ShapeTree);
+                            master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart!.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
                     }
@@ -213,7 +212,7 @@ static object Export(ExportRequest request)
             {
                 if (scale != 1 && part.SlideMaster.TextStyles is { } styles)
                     ScaleText(styles, scale);
-                ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale));
+                ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale), scale);
                 part.SlideMaster.Save();
             }
             foreach (var (tree, root, master, style, scale) in shapeDefaults)
@@ -221,20 +220,28 @@ static object Export(ExportRequest request)
                 if (tree is null || style is null)
                     continue;
                 var scaled = ScaledDefaults(style, scale)!;
-                var shapeStyle = new Drawing.ListStyle();
-                if (master.SlideMaster.TextStyles?.OtherStyle is { } other)
-                    foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
-                        shapeStyle.AddChild(level.CloneNode(true));
-                MergeTextProperties(shapeStyle, scaled);
                 foreach (var shape in tree.Descendants<Shape>())
                 {
                     var properties = shape.NonVisualShapeProperties;
                     if (properties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
                         shape.TextBody is not { } body)
                         continue;
+                    var styleForShape = scaled;
+                    if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true &&
+                        master.SlideMaster.TextStyles?.OtherStyle is { } other)
+                    {
+                        // Local list defaults already take precedence over the master.
+                        if (body.ListStyle?.HasChildren == true)
+                            continue;
+                        var inherited = new Drawing.ListStyle();
+                        foreach (var level in other.ChildElements.Where(element => element.LocalName != "defPPr"))
+                            inherited.AddChild(level.CloneNode(true));
+                        MergeTextProperties(inherited, scaled);
+                        body.ListStyle = inherited;
+                        continue;
+                    }
                     body.ListStyle ??= new Drawing.ListStyle();
-                    MergeTextProperties(body.ListStyle,
-                        properties?.NonVisualShapeDrawingProperties?.TextBox?.Value == true ? scaled : shapeStyle);
+                    MergeTextProperties(body.ListStyle, styleForShape);
                 }
                 root.Save();
             }
@@ -248,10 +255,13 @@ static object Export(ExportRequest request)
     }
 
     using var saved = PresentationDocument.Open(request.Path, false);
+    var count = request.Files.Sum(file => file.Pages.Length);
+    if (saved.GetAllParts().OfType<SlidePart>().Count() != count)
+        throw new InvalidDataException("輸出檔包含未選取的投影片，請檢查來源的投影片連結。");
     var invalid = new OpenXmlValidator(FileFormatVersions.Office2021).Validate(saved).FirstOrDefault();
     if (invalid is not null)
         throw new InvalidDataException($"輸出檔未通過 PowerPoint 結構檢查。{invalid.Part?.Uri}：{invalid.Description}");
-    return new { count = request.Files.Sum(file => file.Pages.Length) };
+    return new { count };
 }
 
 static FileStream? PrepareSource(FileStream source, int[] pages)
@@ -276,7 +286,7 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
             {
                 var links = SlideLinks(part).ToArray();
                 var ids = links.Select(link => link.RelationshipId).ToHashSet(StringComparer.Ordinal);
-                var root = part.RootElement!;
+                var root = part.RootElement;
                 // Resolve nested fallback groups before copying an outer fallback.
                 foreach (var choice in ZoomChoices(part).Reverse())
                 {
@@ -289,15 +299,15 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
                         alternate.Parent!.InsertBefore(visual.CloneNode(true), alternate);
                     alternate.Remove();
                 }
-                foreach (var action in JumpActions(part).Concat(root.Descendants().Where(element =>
+                foreach (var action in JumpActions(part).Concat((root?.Descendants() ?? []).Where(element =>
                     element.LocalName is "hlinkClick" or "hlinkHover" or "hlinkMouseOver" &&
                     element.GetAttributes().Any(attr => attr.LocalName == "id" &&
-                        attr.NamespaceUri == "http://schemas.openxmlformats.org/officeDocument/2006/relationships" &&
+                        attr.NamespaceUri == RelationshipNamespace() &&
                         attr.Value is { } id && ids.Contains(id)))).Distinct().ToArray())
                     action.Remove();
                 foreach (var link in links)
                     part.DeletePart(link.RelationshipId);
-                root.Save();
+                root?.Save();
             }
         }
         copy.Position = 0;
@@ -319,27 +329,33 @@ static IEnumerable<OpenXmlPart> NavigationParts(PresentationPart source, int[] p
     var slides = SlidesInOrder(source);
     var parts = new HashSet<OpenXmlPart>();
     foreach (var page in pages)
-    {
-        var slide = slides[page - 1];
-        parts.Add(slide);
-        if (slide.SlideLayoutPart is { } layout)
-        {
-            parts.Add(layout);
-            if (layout.SlideMasterPart is { } master && parts.Add(master))
-                parts.UnionWith(master.SlideLayoutParts);
-        }
-        if (slide.NotesSlidePart is { } notes)
-            parts.Add(notes);
-    }
+        Add(slides[page - 1]);
     return parts;
+
+    void Add(OpenXmlPart part)
+    {
+        if (!parts.Add(part))
+            return;
+        foreach (var child in part.Parts.Select(pair => pair.OpenXmlPart))
+            if (child is not SlidePart)
+                Add(child);
+    }
 }
 
-static IEnumerable<IdPartPair> SlideLinks(OpenXmlPart part) =>
-    part is NotesSlidePart ? [] : part.Parts.Where(link => link.OpenXmlPart is SlidePart);
+static IEnumerable<IdPartPair> SlideLinks(OpenXmlPart part)
+{
+    var note = part as NotesSlidePart;
+    var owner = note?.Parts.Select(pair => pair.OpenXmlPart).OfType<SlidePart>()
+        .FirstOrDefault(slide => slide.NotesSlidePart == note);
+    return part.Parts.Where(link => link.OpenXmlPart is SlidePart &&
+        (note is null || link.OpenXmlPart != owner));
+}
+
+static string RelationshipNamespace() => "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 static IEnumerable<AlternateContentChoice> ZoomChoices(OpenXmlPart part) =>
     (part.RootElement?.Descendants<AlternateContentChoice>() ?? []).Where(choice =>
-        choice.Parent is AlternateContent && choice.ChildElements.Any(element =>
+        choice.Parent is AlternateContent && choice.Descendants().Any(element =>
             (element.LocalName, element.NamespaceUri) is
                 ("sldZm", "http://schemas.microsoft.com/office/powerpoint/2016/slidezoom") or
                 ("sectionZm", "http://schemas.microsoft.com/office/powerpoint/2016/sectionzoom") or
@@ -370,17 +386,25 @@ static string? FormatKey(OpenXmlElement? value)
     return Normalize(XElement.Parse(value.OuterXml)).ToString(SaveOptions.DisableFormatting);
 }
 
-static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults)
+static void ApplyTextDefaults(SlideMaster master, DefaultTextStyle? defaults, double scale)
 {
-    if (defaults is null)
+    if (defaults is null && scale == 1)
         return;
     master.TextStyles ??= new TextStyles();
     var styles = master.TextStyles;
     styles.TitleStyle ??= new TitleStyle();
     styles.BodyStyle ??= new BodyStyle();
-    // OtherStyle also controls table text. Keep its own defaults rather than applying text box defaults to cells.
-    foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
-        MergeTextProperties(style, defaults);
+    if (defaults is not null)
+        foreach (var style in new OpenXmlCompositeElement[] { styles.TitleStyle, styles.BodyStyle })
+            MergeTextProperties(style, defaults);
+    if (scale != 1)
+    {
+        styles.OtherStyle ??= new OtherStyle();
+        var size = Math.Clamp((int)Math.Round(1800 * scale), 100, 400000);
+        var fallback = new OtherStyle(new Drawing.Level1ParagraphProperties(
+            new Drawing.DefaultRunProperties { FontSize = size }));
+        MergeTextProperties(styles.OtherStyle, fallback);
+    }
 }
 
 static DefaultTextStyle? ScaledDefaults(DefaultTextStyle? source, double scale)
@@ -554,6 +578,7 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
                 Picture item => item.ShapeProperties?.Transform2D,
                 ConnectionShape item => item.ShapeProperties?.Transform2D,
                 GraphicFrame item => item.Transform,
+                ContentPart item => item.GetFirstChild<DocumentFormat.OpenXml.Office2010.PowerPoint.Transform2D>(),
                 GroupShape item => item.GroupShapeProperties?.TransformGroup,
                 _ => null,
             }, dx, dy);
@@ -671,14 +696,23 @@ static void FitBackground(SlidePart slide, SlideLayoutPart layout, SlideMasterPa
     rect.Right = Inset(rect.Right?.Value, x);
     rect.Top = Inset(rect.Top?.Value, y);
     rect.Bottom = Inset(rect.Bottom?.Value, y);
-    foreach (var blip in picture.Descendants<Drawing.Blip>())
+    if (owner != slide)
     {
-        if (owner != slide && blip.Embed?.Value is { } imageId)
-            blip.Embed = slide.GetIdOfPart(slide.AddPart(owner.GetPartById(imageId)));
-        if (owner != slide && blip.Link?.Value is { } linkId)
+        foreach (var element in picture.Descendants())
+        foreach (var attribute in element.GetAttributes().Where(attribute =>
+            attribute.NamespaceUri == RelationshipNamespace() && attribute.LocalName is "embed" or "link"))
         {
-            var link = owner.GetExternalRelationship(linkId);
-            blip.Link = slide.AddExternalRelationship(link.RelationshipType, link.Uri).Id;
+            if (attribute.Value is not { Length: > 0 } id)
+                continue;
+            string newId;
+            if (owner.TryGetPartById(id, out var image))
+                newId = slide.GetIdOfPart(slide.AddPart(image));
+            else
+            {
+                var link = owner.GetExternalRelationship(id);
+                newId = slide.AddExternalRelationship(link.RelationshipType, link.Uri).Id;
+            }
+            element.SetAttribute(new OpenXmlAttribute(attribute.Prefix, attribute.LocalName, attribute.NamespaceUri, newId));
         }
     }
     slideData.Background = clone;
@@ -720,10 +754,9 @@ static void CopyEmbeddedFonts(PresentationPart source, PresentationPart target,
         var clone = (EmbeddedFont)font.CloneNode(true);
         var name = font.Font?.Typeface?.Value ??
             throw new InvalidDataException($"{label} 的內嵌字型沒有名稱。");
-        var relationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         var resources = clone.ChildElements.Select(element =>
             (Element: element, Id: element.GetAttributes().FirstOrDefault(attribute =>
-                attribute.LocalName == "id" && attribute.NamespaceUri == relationshipNamespace)))
+                attribute.LocalName == "id" && attribute.NamespaceUri == RelationshipNamespace())))
             .Where(pair => !string.IsNullOrEmpty(pair.Id.Value)).ToArray();
         foreach (var (element, id) in resources)
         {
