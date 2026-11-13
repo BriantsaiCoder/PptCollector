@@ -238,9 +238,11 @@ static object Export(ExportRequest request)
                 if (tree is null)
                     continue;
                 var scaled = ScaledDefaults(style, scale);
-                if (scaled is not null)
+                if (scale != 1)
                 {
-                    var masterText = master.SlideMaster.TextStyles?.OtherStyle;
+                    // Tables use their cell/table formatting and an independent 18pt fallback.
+                    // Presentation defaults describe slide text, not table cell text.
+                    var implicitCellSize = Math.Clamp((int)Math.Round(1800 * scale), 100, 400000);
                     foreach (var cell in tree.Descendants<Drawing.TableCell>())
                     {
                         if (cell.TextBody is not { } textBody)
@@ -248,9 +250,7 @@ static object Export(ExportRequest request)
                         foreach (var paragraph in textBody.Elements<Drawing.Paragraph>())
                         {
                             var level = paragraph.ParagraphProperties?.Level?.Value ?? 0;
-                            var size = FontSizeAtLevel(scaled, level);
-                            if (size is null || FontSizeAtLevel(masterText, level) is not null ||
-                                FontSizeAtLevel(textBody.ListStyle, level) is not null)
+                            if (FontSizeAtLevel(textBody.ListStyle, level) is not null)
                                 continue;
                             var properties = paragraph.ParagraphProperties ??= new Drawing.ParagraphProperties();
                             var defaults = properties.GetFirstChild<Drawing.DefaultRunProperties>();
@@ -259,7 +259,7 @@ static object Export(ExportRequest request)
                                 defaults = new Drawing.DefaultRunProperties();
                                 properties.AddChild(defaults);
                             }
-                            defaults.FontSize ??= size.Value;
+                            defaults.FontSize ??= implicitCellSize;
                         }
                     }
                 }
