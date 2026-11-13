@@ -349,10 +349,20 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
             return null;
 
     var path = Path.Combine(Path.GetTempPath(), $"pptcollector-{Guid.NewGuid():N}.tmp");
-    var copy = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-        81920, FileOptions.DeleteOnClose);
+    var options = new FileStreamOptions
+    {
+        Mode = FileMode.CreateNew, Access = FileAccess.ReadWrite, Share = FileShare.None, BufferSize = 81920,
+    };
+    if (OperatingSystem.IsWindows())
+        options.Options = FileOptions.DeleteOnClose;
+    else
+        options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    var copy = new FileStream(path, options);
     try
     {
+        // Unlink before writing on Unix so a force quit cannot leave a named copy of the source.
+        if (!OperatingSystem.IsWindows())
+            File.Delete(path);
         source.Position = 0;
         source.CopyTo(copy);
         copy.Position = 0;
