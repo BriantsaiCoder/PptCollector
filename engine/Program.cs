@@ -219,10 +219,13 @@ static object Export(ExportRequest request)
                 var tree = part.Slide.CommonSlideData?.ShapeTree;
                 if (tree is null)
                     continue;
-                foreach (var shape in tree.Descendants<Shape>().Where(shape =>
-                    shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is null))
+                foreach (var shape in tree.Descendants<Shape>())
                 {
-                    if (shape.TextBody is not { } body)
+                    var properties = shape.NonVisualShapeProperties;
+                    // Free text boxes use presentation defaults; regular shapes already inherit the master style.
+                    if (properties?.NonVisualShapeDrawingProperties?.TextBox?.Value != true ||
+                        properties.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
+                        shape.TextBody is not { } body)
                         continue;
                     body.ListStyle ??= new Drawing.ListStyle();
                     MergeTextProperties(body.ListStyle, scaled);
