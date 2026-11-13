@@ -97,7 +97,7 @@ static object Export(ExportRequest request)
         destination.Presentation = new Presentation(masters, slides);
         uint slideId = 256, layoutId = 0x80000000;
         var textDefaults = new List<(SlideMasterPart Part, DefaultTextStyle? Style, double Scale)>();
-        var shapeDefaults = new List<(ShapeTree? Tree, OpenXmlPartRootElement Root, SlideMasterPart Master, DefaultTextStyle? Style, double Scale)>();
+        var shapeDefaults = new List<(ShapeTree? Tree, OpenXmlPartRootElement Root, SlideMasterPart Master, DefaultTextStyle? Style, double Scale, ShapeTree? Layout)>();
         var tableStyles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var embeddedFonts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var registeredMasters = new HashSet<Uri>();
@@ -146,7 +146,7 @@ static object Export(ExportRequest request)
                     {
                         textDefaults.Add((master, origin.Presentation.DefaultTextStyle, scale));
                         shapeDefaults.Add((master.SlideMaster.CommonSlideData?.ShapeTree, master.SlideMaster, master,
-                            origin.Presentation.DefaultTextStyle, scale));
+                            origin.Presentation.DefaultTextStyle, scale, null));
                         if (resize)
                             FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize);
                         UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
@@ -163,7 +163,7 @@ static object Export(ExportRequest request)
                                     master: master.SlideMaster.CommonSlideData?.ShapeTree);
                             UpdateTableStyleReferences(layoutTree, styleIds);
                             layout.SlideLayout.Save();
-                            shapeDefaults.Add((layoutTree, layout.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale));
+                            shapeDefaults.Add((layoutTree, layout.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale, null));
                         }
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
@@ -176,7 +176,8 @@ static object Export(ExportRequest request)
                     }
                     UpdateTableStyleReferences(tree, styleIds);
                     copy.Slide.Save();
-                    shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale));
+                    shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale,
+                        layoutPart!.SlideLayout.CommonSlideData?.ShapeTree));
                     if (copy.NotesSlidePart is { } notes &&
                         UpdateTableStyleReferences(notes.NotesSlide, styleIds))
                         notes.NotesSlide.Save();
@@ -232,7 +233,7 @@ static object Export(ExportRequest request)
                 ApplyTextDefaults(part.SlideMaster, ScaledDefaults(style, scale));
                 part.SlideMaster.Save();
             }
-            foreach (var (tree, root, master, style, scale) in shapeDefaults)
+            foreach (var (tree, root, master, style, scale, layout) in shapeDefaults)
             {
                 if (tree is null)
                     continue;
@@ -270,9 +271,29 @@ static object Export(ExportRequest request)
                 foreach (var shape in tree.Descendants<Shape>())
                 {
                     var properties = shape.NonVisualShapeProperties;
-                    if (properties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>() is not null ||
-                        shape.TextBody is not { } body)
+                    if (shape.TextBody is not { } body)
                         continue;
+                    var placeholder = ShapePlaceholder(shape);
+                    if (placeholder is not null)
+                    {
+                        var parent = FindLayoutPlaceholder(layout, placeholder);
+                        var type = (parent is null ? placeholder : ShapePlaceholder(parent))?.Type?.Value;
+                        if (type != PlaceholderValues.Footer && type != PlaceholderValues.DateAndTime &&
+                            type != PlaceholderValues.SlideNumber)
+                            continue;
+                        // Keep inheritance from an existing layout/master placeholder. Only materialize
+                        // the presentation fallback on the first placeholder in that chain.
+                        var masterTree = master.SlideMaster.CommonSlideData?.ShapeTree;
+                        if (parent?.TextBody is not null || (!ReferenceEquals(tree, masterTree) &&
+                            masterTree?.Descendants<Shape>().Any(candidate =>
+                                candidate.TextBody is not null && ShapePlaceholder(candidate)?.Type?.Value == type) == true))
+                            continue;
+                        body.ListStyle ??= new Drawing.ListStyle();
+                        if (master.SlideMaster.TextStyles?.OtherStyle is { } otherStyle)
+                            MergeTextDefaults(body.ListStyle, otherStyle);
+                        MergeTextDefaults(body.ListStyle, scaled);
+                        continue;
+                    }
                     OpenXmlCompositeElement styleForShape = scaled;
                     var fontRef = shape.ShapeStyle?.GetFirstChild<Drawing.FontReference>();
                     var hasThemeFont = fontRef?.Index?.Value is { } fontIndex &&
@@ -338,15 +359,16 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
         source.Position = 0;
         source.CopyTo(copy);
         copy.Position = 0;
-        using (var editable = PresentationDocument.Open(copy, true))
+        using (var editable = PresentationDocument.Open(copy, true, new OpenSettings { AutoSave = false }))
         {
             foreach (var part in NavigationParts(ReadPresentation(editable), pages).ToArray())
             {
                 var links = SlideLinks(part).ToArray();
                 var ids = links.Select(link => link.RelationshipId).ToHashSet(StringComparer.Ordinal);
                 var root = part.RootElement;
+                var zoom = ZoomChoices(part).Reverse().ToArray();
                 // Resolve nested fallback groups before copying an outer fallback.
-                foreach (var choice in ZoomChoices(part).Reverse())
+                foreach (var choice in zoom)
                 {
                     // The fallback picture/group keeps the thumbnail and position without the jump.
                     var alternate = (AlternateContent)choice.Parent!;
@@ -357,15 +379,17 @@ static FileStream? PrepareSource(FileStream source, int[] pages)
                         alternate.Parent!.InsertBefore(visual.CloneNode(true), alternate);
                     alternate.Remove();
                 }
-                foreach (var action in JumpActions(part).Concat((root?.Descendants() ?? []).Where(element =>
+                var actions = JumpActions(part).Concat((root?.Descendants() ?? []).Where(element =>
                     element.LocalName is "hlinkClick" or "hlinkHover" or "hlinkMouseOver" &&
                     element.GetAttributes().Any(attr => attr.LocalName == "id" &&
                         attr.NamespaceUri == RelationshipNamespace() &&
-                        attr.Value is { } id && ids.Contains(id)))).Distinct().ToArray())
+                        attr.Value is { } id && ids.Contains(id)))).Distinct().ToArray();
+                foreach (var action in actions)
                     action.Remove();
                 foreach (var link in links)
                     part.DeletePart(link.RelationshipId);
-                root?.Save();
+                if (zoom.Length != 0 || actions.Length != 0)
+                    root?.Save();
             }
         }
         copy.Position = 0;
@@ -629,6 +653,14 @@ static string NotesSignature(NotesMasterPart master, string? label)
     return string.Join("\n", pieces);
 }
 
+static PlaceholderShape? ShapePlaceholder(Shape shape) =>
+    shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
+
+static Shape? FindLayoutPlaceholder(ShapeTree? layout, PlaceholderShape current) =>
+    layout?.Descendants<Shape>().FirstOrDefault(candidate =>
+        ShapePlaceholder(candidate) is { } inherited &&
+        (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0));
+
 static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
     ShapeTree? master = null, ShapeTree? layout = null)
 {
@@ -707,21 +739,23 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
     FitShapes(tree, left, top);
     if (scale != 1)
     {
+        foreach (var line in tree.Descendants<Drawing.LinePropertiesType>())
+            if (line.Width?.Value is { } widthEmu)
+                line.Width = (int)Math.Clamp(Scale(widthEmu), 0, 20116800);
+
         // Otherwise PowerPoint reapplies unscaled schema defaults to the fitted objects.
         foreach (var shape in tree.Descendants<Shape>())
         {
             if (shape.TextBody?.BodyProperties is not { } body)
                 continue;
-            if (Placeholder(shape) is { } current)
+            if (ShapePlaceholder(shape) is { } current)
             {
-                var parent = layout?.Descendants<Shape>().FirstOrDefault(candidate =>
-                    Placeholder(candidate) is { } inherited &&
-                    (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0));
-                var masterType = MasterPlaceholderType(parent is null ? current : Placeholder(parent)!);
+                var parent = FindLayoutPlaceholder(layout, current);
+                var masterType = MasterPlaceholderType(parent is null ? current : ShapePlaceholder(parent)!);
                 if (parent?.TextBody?.BodyProperties is not null ||
                     master?.Descendants<Shape>().Any(candidate =>
                         candidate.TextBody?.BodyProperties is not null &&
-                        Placeholder(candidate)?.Type?.Value == masterType) == true)
+                        ShapePlaceholder(candidate)?.Type?.Value == masterType) == true)
                     continue; // Preserve inherited margins; their source has already been scaled.
             }
             body.LeftInset ??= 91440;
@@ -739,9 +773,6 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target,
         }
     }
     ScaleText(tree, scale);
-
-    static PlaceholderShape? Placeholder(Shape shape) =>
-        shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
 
     static PlaceholderValues MasterPlaceholderType(PlaceholderShape placeholder)
     {
