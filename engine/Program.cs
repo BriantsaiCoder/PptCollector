@@ -133,6 +133,20 @@ static object Export(ExportRequest request)
                 var scale = CanvasScale(size, targetSize);
                 var sourceTableStyles = origin.TableStylesPart?.TableStyleList;
                 var styleIds = CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, scale);
+                var hasThemedBorders = scale != 1 &&
+                    sourceTableStyles?.Descendants<Drawing.ThemeableLineStyleType>().Any(border => border.LineReference is not null) == true;
+                var stylesByTheme = new Dictionary<Drawing.LineStyleList, Dictionary<string, string>>();
+                Dictionary<string, string> StyleIds(Drawing.FormatScheme? theme)
+                {
+                    if (!hasThemedBorders || theme?.LineStyleList is not { } lines)
+                        return styleIds;
+                    if (!stylesByTheme.TryGetValue(lines, out var ids))
+                    {
+                        ids = CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, scale, lines);
+                        stylesByTheme.Add(lines, ids);
+                    }
+                    return ids;
+                }
                 var notesStyleIds = scale != 1 && file.Pages.Any(page => sourceSlides[page - 1].NotesSlidePart is not null)
                     ? CopyTableStyles(sourceTableStyles, destination, tableStyles, file.Label, 1)
                     : styleIds;
@@ -154,7 +168,7 @@ static object Export(ExportRequest request)
                             origin.Presentation.DefaultTextStyle, scale, null));
                         if (resize)
                             FitCanvas(master.SlideMaster.CommonSlideData?.ShapeTree, size, targetSize, masterStyle);
-                        UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, styleIds);
+                        UpdateTableStyleReferences(master.SlideMaster.CommonSlideData?.ShapeTree, StyleIds(masterStyle));
                         destination.AddPart(master);
                         masters.AppendChild(new SlideMasterId { Id = layoutId++, RelationshipId = destination.GetIdOfPart(master) });
                         foreach (var layout in master.SlideMaster.SlideLayoutIdList!.Elements<SlideLayoutId>())
@@ -163,26 +177,27 @@ static object Export(ExportRequest request)
                         foreach (var layout in master.SlideLayoutParts)
                         {
                             var layoutTree = layout.SlideLayout.CommonSlideData?.ShapeTree;
+                            var layoutStyle = resize ? layout.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle : null;
                             if (resize)
                                 FitCanvas(layoutTree, size, targetSize,
-                                    layout.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle,
+                                    layoutStyle,
                                     master: master.SlideMaster.CommonSlideData?.ShapeTree);
-                            UpdateTableStyleReferences(layoutTree, styleIds);
+                            UpdateTableStyleReferences(layoutTree, StyleIds(layoutStyle));
                             layout.SlideLayout.Save();
                             shapeDefaults.Add((layoutTree, layout.SlideLayout, master, origin.Presentation.DefaultTextStyle, scale, null));
                         }
                     }
                     var tree = copy.Slide.CommonSlideData?.ShapeTree;
+                    var slideStyle = resize ? copy.ThemeOverridePart?.ThemeOverride.FormatScheme ??
+                        layoutPart!.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle : null;
                     if (resize)
                     {
-                        FitCanvas(tree, size, targetSize,
-                            copy.ThemeOverridePart?.ThemeOverride.FormatScheme ??
-                            layoutPart!.ThemeOverridePart?.ThemeOverride.FormatScheme ?? masterStyle,
+                        FitCanvas(tree, size, targetSize, slideStyle,
                             master.SlideMaster.CommonSlideData?.ShapeTree, layoutPart!.SlideLayout.CommonSlideData?.ShapeTree);
                         if (copy.Slide.CommonSlideData is not null)
                             FitBackground(copy, layoutPart!, master, size, targetSize);
                     }
-                    UpdateTableStyleReferences(tree, styleIds);
+                    UpdateTableStyleReferences(tree, StyleIds(slideStyle));
                     copy.Slide.Save();
                     shapeDefaults.Add((tree, copy.Slide, master, origin.Presentation.DefaultTextStyle, scale,
                         layoutPart!.SlideLayout.CommonSlideData?.ShapeTree));
@@ -577,7 +592,7 @@ static string? TextPropertyChoice(string name) => name switch
 };
 
 static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source,
-    PresentationPart target, Dictionary<string, string> seen, string label, double scale)
+    PresentationPart target, Dictionary<string, string> seen, string label, double scale, Drawing.LineStyleList? lines = null)
 {
     var remap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     if (source is null)
@@ -594,7 +609,7 @@ static Dictionary<string, string> CopyTableStyles(Drawing.TableStyleList? source
         if (style.Descendants<Drawing.Blip>().Any(blip => blip.Embed is not null || blip.Link is not null))
             throw new InvalidDataException($"{label} 的表格樣式使用了不支援的外部圖片關聯。");
         var clone = (Drawing.TableStyleEntry)style.CloneNode(true);
-        ScaleLineWidths(clone, scale);
+        ScaleLineWidths(clone, scale, lines);
         var signature = FormatKey(clone)!;
         var key = id.ToUpperInvariant() + "\n" + signature;
         if (seen.TryGetValue(key, out var priorId))
@@ -669,13 +684,42 @@ static Shape? FindLayoutPlaceholder(ShapeTree? layout, PlaceholderShape current)
         ShapePlaceholder(candidate) is { } inherited &&
         (current.Index?.Value ?? 0) == (inherited.Index?.Value ?? 0));
 
-static void ScaleLineWidths(OpenXmlElement tree, double scale)
+static void ScaleLineWidths(OpenXmlElement tree, double scale, Drawing.LineStyleList? lines = null)
 {
     if (scale == 1)
         return;
+    if (lines is not null)
+        foreach (var border in tree.Descendants<Drawing.ThemeableLineStyleType>())
+            if (border.LineReference is { } reference &&
+                ThemeOutline(lines, reference) is { Width: not null } inherited)
+            {
+                var outline = (Drawing.Outline)inherited.CloneNode(true);
+                ResolveStyleColor(outline, reference);
+                border.ReplaceChild(outline, reference);
+            }
     foreach (var line in tree.Descendants<Drawing.LinePropertiesType>())
         if (line.Width?.Value is { } widthEmu)
             line.Width = (int)Math.Clamp(Math.Round(widthEmu * scale), 0, 20116800);
+}
+
+static Drawing.Outline? ThemeOutline(Drawing.LineStyleList? lines, Drawing.LineReference? reference) =>
+    reference?.Index?.Value is > 0 and <= int.MaxValue and var index
+        ? lines?.Elements<Drawing.Outline>().ElementAtOrDefault((int)index - 1)
+        : null;
+
+static void ResolveStyleColor(OpenXmlElement node, Drawing.StyleMatrixReferenceType reference)
+{
+    if (reference.FirstChild is not OpenXmlCompositeElement referenceColor)
+        return;
+    foreach (var placeholder in node.Descendants<Drawing.SchemeColor>()
+        .Where(color => color.Val?.Value == Drawing.SchemeColorValues.PhColor).ToArray())
+    {
+        var color = (OpenXmlCompositeElement)referenceColor.CloneNode(true);
+        foreach (var modifier in placeholder.ChildElements)
+            color.AppendChild(modifier.CloneNode(true));
+        placeholder.InsertAfterSelf(color);
+        placeholder.Remove();
+    }
 }
 
 static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawing.FormatScheme? themeStyle,
@@ -723,9 +767,7 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
                 shape.GetFirstChild<ShapeProperties>() is { } properties)
             {
                 // Keep the theme intact for other parts such as notes.
-                if (style.LineReference?.Index?.Value is > 0 and <= int.MaxValue and var lineIndex &&
-                    themeStyle.LineStyleList?.Elements<Drawing.Outline>().ElementAtOrDefault((int)lineIndex - 1)?.Width?.Value
-                        is { } inheritedWidth)
+                if (ThemeOutline(themeStyle.LineStyleList, style.LineReference)?.Width?.Value is { } inheritedWidth)
                 {
                     var outline = properties.GetFirstChild<Drawing.Outline>();
                     if (outline is null)
@@ -744,16 +786,7 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
                 {
                     var effects = inheritedEffects.CloneNode(true);
                     // phClr in a matrix effect uses the color supplied by this shape's effectRef.
-                    if (reference.FirstChild is OpenXmlCompositeElement referenceColor)
-                        foreach (var placeholder in effects.Descendants<Drawing.SchemeColor>()
-                            .Where(color => color.Val?.Value == Drawing.SchemeColorValues.PhColor).ToArray())
-                        {
-                            var color = (OpenXmlCompositeElement)referenceColor.CloneNode(true);
-                            foreach (var modifier in placeholder.ChildElements)
-                                color.AppendChild(modifier.CloneNode(true));
-                            placeholder.InsertAfterSelf(color);
-                            placeholder.Remove();
-                        }
+                    ResolveStyleColor(effects, reference);
                     properties.AddChild(effects);
                 }
             }
@@ -793,7 +826,7 @@ static void FitCanvas(ShapeTree? tree, SlideSize source, SlideSize target, Drawi
     }
 
     FitShapes(tree, left, top);
-    ScaleLineWidths(tree, scale);
+    ScaleLineWidths(tree, scale, themeStyle?.LineStyleList);
     if (scale != 1)
     {
         ScaleEffectDistances(tree, scale);
