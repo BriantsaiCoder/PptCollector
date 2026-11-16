@@ -47,13 +47,10 @@ h2 { font-size: 17px; line-height: 1.4; }
   width: 11px; height: 2px; background: var(--blue); border-radius: 2px;
 }
 .format { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.guide {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px;
+.usage-tips {
+  display: flex; flex-wrap: wrap; gap: 3px 24px; font-size: 13px; line-height: 1.5;
   padding: 9px clamp(18px, 3vw, 40px); background: var(--tint); border-bottom: 1px solid var(--line);
 }
-.guide h2 { color: var(--blue); font-size: 14px; }
-.guide p { font-size: 13px; line-height: 1.5; }
-.guide-target { box-shadow: 0 0 0 2px var(--blue); }
 .workspace {
   display: grid; grid-template-columns: minmax(245px, 29%) minmax(0, 1fr); gap: 18px;
   padding: 20px clamp(18px, 3vw, 40px); align-items: start; overflow: auto; min-height: 0;
@@ -212,7 +209,7 @@ td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue)
 }
 @media (max-width: 430px) {
   .format { display: none; }
-  #guide-toggle { margin-left: auto; }
+  #tips-toggle { margin-left: auto; }
   .workspace { padding-inline: 12px; }
   .results-head, .settings { padding: 14px; }
   .export-bar form { grid-template-columns: minmax(0, 1fr); }
