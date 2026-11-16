@@ -8,13 +8,23 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand-mark" aria-hidden="true"><span></span></div>
-    <div>
-      <h1>PptCollector</h1>
-      <p>投影片搜尋與合併</p>
+  <header>
+    <div class="app-header">
+      <div class="brand-mark" aria-hidden="true"><span></span></div>
+      <div>
+        <h1>PptCollector</h1>
+        <p>投影片搜尋與合併</p>
+      </div>
+      <span class="format">PowerPoint · .pptx</span>
+      <button id="guide-toggle" type="button" class="secondary" aria-controls="guide" aria-expanded="false">使用導覽</button>
     </div>
-    <span class="format">PowerPoint · .pptx</span>
+    <section id="guide" class="guide" aria-label="使用導覽步驟" hidden>
+      <div role="status">
+        <h2 id="guide-title"></h2>
+        <p id="guide-hint"></p>
+      </div>
+      <button id="guide-continue" type="button" class="secondary" hidden>確認選取，前往匯出</button>
+    </section>
   </header>
 
   <main class="workspace">
@@ -59,7 +69,7 @@
       </div>
     </section>
 
-    <section class="results panel" aria-labelledby="results-title">
+    <section id="results" class="results panel" aria-labelledby="results-title">
       <div class="results-head">
         <div><h2 id="results-title">搜尋結果</h2><p class="hint" id="result-summary">可在匯出前勾選要保留的投影片。</p></div>
         <button id="toggle" class="secondary" type="button" hidden>取消全選</button>

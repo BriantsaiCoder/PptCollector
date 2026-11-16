@@ -2,6 +2,7 @@ const byId = id => document.getElementById(id);
 const bridge = window.__TAURI__;
 const PAGE_SIZE = 40;
 const SECURITY_SUFFIX = "_(Security C)";
+const GUIDE_SEEN = "pptcollector-guide-seen";
 const state = { folder: "", terms: [], phase: "", scan: null, selected: new Set(), page: 0, exported: false, exportedPath: "" };
 const field = byId("term");
 const fileName = byId("name");
@@ -10,6 +11,83 @@ const radios = [...document.querySelectorAll("input[name=mode]")];
 const sourceMenu = byId("source-menu");
 const sourceActions = [...sourceMenu.querySelectorAll("button")];
 let menuSource = null;
+const guide = byId("guide");
+const guideToggle = byId("guide-toggle");
+const guideContinue = byId("guide-continue");
+let guideProgress = "";
+let guideTarget = null;
+
+function setGuideVisible(visible) {
+  guideProgress = "";
+  guide.hidden = !visible;
+  guideToggle.setAttribute("aria-expanded", String(visible));
+  guideToggle.textContent = visible ? "關閉導覽" : "使用導覽";
+  if (!visible) rememberGuide();
+  updateGuide();
+}
+
+function rememberGuide() {
+  try { localStorage.setItem(GUIDE_SEEN, "1"); }
+  catch { /* The guide still works for this session when storage is unavailable. */ }
+}
+
+function updateGuide() {
+  let title, hint, target, action;
+  if (!guide.hidden) {
+    if (guideProgress === "complete") {
+      title = "導覽完成";
+      hint = "簡報已匯出。下方顯示實際儲存路徑，也可以開啟輸出資料夾。";
+      target = "open";
+      action = "完成導覽";
+    } else if (!state.folder) {
+      title = "1 / 4　選擇資料夾";
+      hint = "按「選擇…」，選一個存有 .pptx 簡報的資料夾。子資料夾也會一起搜尋。";
+      target = "choose";
+    } else if (!state.scan?.hits.length) {
+      title = "2 / 4　搜尋投影片";
+      hint = state.scan
+        ? "找不到符合的投影片。試著移除或更換關鍵字，再按「搜尋投影片」。"
+        : "輸入簡報裡可能出現的文字。多個關鍵字可用 Enter 分別加入，再按「搜尋投影片」。";
+      target = byId("search").disabled ? "term" : "search";
+    } else if (!guideProgress || !state.selected.size) {
+      title = "3 / 4　確認要保留的投影片";
+      hint = "結果預設全選。取消勾選不需要的投影片，確認後前往匯出。";
+      target = "results";
+      action = "確認選取，前往匯出";
+    } else {
+      title = "4 / 4　匯出簡報";
+      hint = "輸入檔名或沿用預設名稱，再按「匯出 .pptx」。檔案會存回你選的資料夾。";
+      target = "name";
+    }
+
+    for (const [id, value] of [["guide-title", title], ["guide-hint", hint]]) {
+      const label = byId(id);
+      if (label.textContent !== value) label.textContent = value;
+    }
+    guideContinue.hidden = !action;
+    if (action) guideContinue.textContent = action;
+    guideContinue.disabled = Boolean(state.phase) || (guideProgress !== "complete" && !state.selected.size);
+  }
+
+  const nextTarget = target && !state.phase ? byId(target) : null;
+  if (guideTarget !== nextTarget) {
+    guideTarget?.classList.remove("guide-target");
+    nextTarget?.classList.add("guide-target");
+    guideTarget = nextTarget;
+  }
+}
+
+guideToggle.addEventListener("click", () => setGuideVisible(guide.hidden));
+guideContinue.addEventListener("click", () => {
+  if (guideProgress === "complete") {
+    setGuideVisible(false);
+    guideToggle.focus();
+  } else {
+    guideProgress = "reviewed";
+    updateGuide();
+    fileName.focus();
+  }
+});
 
 function notify(text, kind = "") {
   const status = byId("status");
@@ -63,9 +141,11 @@ function updateButtons() {
   byId("previous").disabled = busy || state.page === 0;
   byId("next").disabled = busy || (state.page + 1) * PAGE_SIZE >= (state.scan?.hits.length || 0);
   labelPath("output-path", outputPath());
+  updateGuide();
 }
 
 function resetResults() {
+  guideProgress = "";
   state.scan = null;
   state.selected.clear();
   state.page = 0;
@@ -340,14 +420,21 @@ byId("toggle").addEventListener("click", () => {
 
 byId("previous").addEventListener("click", () => { state.page -= 1; drawPage(); });
 byId("next").addEventListener("click", () => { state.page += 1; drawPage(); });
-fileName.addEventListener("input", () => { state.exportedPath = ""; updateButtons(); });
+function updateOutputName() {
+  state.exportedPath = "";
+  if (guideProgress === "complete") guideProgress = "reviewed";
+  updateButtons();
+}
+
+fileName.addEventListener("input", updateOutputName);
 fileName.addEventListener("blur", () => { fileName.value = stem(); updateSelection(); });
-securityName.addEventListener("change", () => { state.exportedPath = ""; updateButtons(); });
+securityName.addEventListener("change", updateOutputName);
 
 byId("export-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (state.phase || !state.scan || byId("export").disabled) return;
   state.phase = "export";
+  if (!guide.hidden) guideProgress = "reviewed";
   state.exported = false;
   state.exportedPath = "";
   notify("正在合併投影片並檢查輸出檔…");
@@ -359,6 +446,10 @@ byId("export-form").addEventListener("submit", async event => {
     });
     state.exported = true;
     state.exportedPath = result.path;
+    if (!guide.hidden) {
+      guideProgress = "complete";
+      rememberGuide();
+    }
     const notes = result.adjusted_notes
       ? `有 ${result.adjusted_notes} 張的備忘稿沿用統一版型，內容仍可編輯。`
       : "";
@@ -381,3 +472,7 @@ if (bridge) {
   }).catch(error => notify(errorText(error), "error"));
 }
 updateButtons();
+let guideSeen = false;
+try { guideSeen = localStorage.getItem(GUIDE_SEEN) === "1"; }
+catch { /* Show the guide by default when storage is unavailable. */ }
+if (!guideSeen) setGuideVisible(true);
