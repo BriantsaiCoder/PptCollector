@@ -8,13 +8,20 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand-mark" aria-hidden="true"><span></span></div>
-    <div>
-      <h1>PptCollector</h1>
-      <p>投影片搜尋與合併</p>
+  <header>
+    <div class="app-header">
+      <div class="brand-mark" aria-hidden="true"><span></span></div>
+      <div>
+        <h1>PptCollector</h1>
+        <p>投影片搜尋與合併</p>
+      </div>
+      <span class="format">PowerPoint · .pptx</span>
+      <button id="tips-toggle" type="button" class="secondary" aria-controls="usage-tips" aria-expanded="false">使用提示</button>
     </div>
-    <span class="format">PowerPoint · .pptx</span>
+    <section id="usage-tips" class="usage-tips" aria-label="使用提示" hidden>
+      <p>搜尋結果預設全選，取消勾選不需要的投影片。</p>
+      <p>匯出的 .pptx 會存回所選的搜尋資料夾。</p>
+    </section>
   </header>
 
   <main class="workspace">

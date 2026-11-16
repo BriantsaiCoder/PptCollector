@@ -381,3 +381,26 @@ if (bridge) {
   }).catch(error => notify(errorText(error), "error"));
 }
 updateButtons();
+
+const tips = byId("usage-tips");
+const tipsToggle = byId("tips-toggle");
+const tipsDismissedKey = "pptcollector-guide-seen";
+
+function setTipsVisible(visible) {
+  tips.hidden = !visible;
+  tipsToggle.setAttribute("aria-expanded", String(visible));
+  tipsToggle.textContent = visible ? "關閉提示" : "使用提示";
+}
+
+let tipsDismissed = false;
+try { tipsDismissed = localStorage.getItem(tipsDismissedKey) === "1"; }
+catch { /* Show tips by default when storage is unavailable. */ }
+if (!tipsDismissed) setTipsVisible(true);
+
+tipsToggle.addEventListener("click", () => {
+  setTipsVisible(tips.hidden);
+  if (tips.hidden) {
+    try { localStorage.setItem(tipsDismissedKey, "1"); }
+    catch { /* Dismissal still applies to the current session. */ }
+  }
+});
