@@ -71,6 +71,13 @@ pub(crate) fn can_stage() -> bool {
         && runtime_root().is_some_and(|root| fixed_ntfs(&root))
 }
 
+pub(crate) fn manual_reason() -> String {
+    env::var(MODE)
+        .ok()
+        .and_then(|mode| mode.strip_prefix("readonly:").map(str::to_owned))
+        .unwrap_or_else(|| "請完整解壓縮新版，再從最外層的 PptCollector.exe 開啟。".into())
+}
+
 pub(crate) fn run_launcher() -> bool {
     let Ok(exe) = env::current_exe() else {
         return false;
@@ -86,7 +93,7 @@ pub(crate) fn run_launcher() -> bool {
 
 fn supervise(root: &Path) -> Result<()> {
     // Hold an exclusive Windows file handle for the entire app/launcher lifetime.
-    let lock = if fixed_ntfs(root) {
+    let (lock, mode) = if fixed_ntfs(root) {
         match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -94,26 +101,46 @@ fn supervise(root: &Path) -> Result<()> {
             .share_mode(0)
             .open(root.join("portable.lock"))
         {
-            Ok(lock) => Some(lock),
+            Ok(lock) => (Some(lock), "ready".to_owned()),
             Err(error) if error.raw_os_error() == Some(32) => {
                 return Err("PptCollector 已開啟。".into());
             }
-            Err(_) => None,
+            Err(error) => (
+                None,
+                format!("readonly:無法寫入這個位置，可手動下載新版。原因：{error}"),
+            ),
         }
     } else {
-        None
+        (
+            None,
+            "readonly:自動更新需要本機固定 NTFS 磁碟，可手動下載新版。".into(),
+        )
     };
+    let result = supervise_session(root, &mode, launch);
+    drop(lock);
+    result
+}
+
+fn supervise_session(
+    root: &Path,
+    mode: &str,
+    mut start: impl FnMut(&Path, &str, &str, Option<&str>) -> Result<Child>,
+) -> Result<()> {
     let pending = root.join(PENDING);
-    if lock.is_some() {
+    let readonly = mode != "ready";
+    if !readonly {
         // Only an update exit from this launched process can request a switch.
         let _ = fs::remove_file(&pending);
     }
     let selection: Selection = read_config(&root.join(VERSION_FILE))?;
-    let readonly = lock.is_none();
-    let mode = if readonly { "readonly" } else { "ready" };
-    let mut child = launch(root, &selection.current, mode, None).or_else(|error| {
+    let mut child = start(root, &selection.current, mode, None).or_else(|error| {
         let previous = selection.previous.as_deref().ok_or(&error)?;
-        launch(root, previous, "readonly", Some(&error))
+        start(
+            root,
+            previous,
+            "readonly:這次從上一版開啟，可手動下載新版。",
+            Some(&error),
+        )
     })?;
     let status = child.wait().map_err(|error| error.to_string())?;
     if readonly || status.code() != Some(UPDATE_EXIT) {
@@ -123,13 +150,21 @@ fn supervise(root: &Path) -> Result<()> {
     loop {
         let candidate = read_config::<Candidate>(&pending);
         let _ = fs::remove_file(&pending);
-        let trial = candidate.and_then(|candidate| activate(root, &selection, candidate));
+        let trial = candidate.and_then(|candidate| {
+            if candidate.slot == selection.current
+                || selection.previous.as_ref() == Some(&candidate.slot)
+            {
+                return Err("新版資料夾無效。".into());
+            }
+            let child = start(root, &candidate.slot, "trial", None)?;
+            commit_trial(child, &root.join(VERSION_FILE), &selection, candidate)
+        });
         let mut child = match trial {
             Ok((child, next)) => {
                 selection = next;
                 child
             }
-            Err(error) => launch(root, &selection.current, mode, Some(&error))?,
+            Err(error) => start(root, &selection.current, mode, Some(&error))?,
         };
         let status = child.wait().map_err(|error| error.to_string())?;
         if status.code() != Some(UPDATE_EXIT) {
@@ -157,18 +192,6 @@ fn launch(root: &Path, slot: &str, mode: &str, restored: Option<&str>) -> Result
     command
         .spawn()
         .map_err(|error| format!("無法啟動 PptCollector：{error}"))
-}
-
-fn activate(
-    root: &Path,
-    selection: &Selection,
-    candidate: Candidate,
-) -> Result<(Child, Selection)> {
-    if candidate.slot == selection.current || selection.previous.as_ref() == Some(&candidate.slot) {
-        return Err("新版資料夾無效。".into());
-    }
-    let child = launch(root, &candidate.slot, "trial", None)?;
-    commit_trial(child, &root.join(VERSION_FILE), selection, candidate)
 }
 
 fn commit_trial(
@@ -507,6 +530,23 @@ mod tests {
     use super::*;
     use zip::{ZipWriter, write::SimpleFileOptions};
 
+    fn fixture_child(command: &str) -> Child {
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn fixture_reply(reply: &str, exit: i32) -> String {
+        format!(
+            "[Console]::Out.Write(\"{reply}`n\"); [Console]::Out.Flush(); \
+             if ([Console]::OpenStandardInput().ReadByte() -ne 49) {{ exit 1 }}; exit {exit}"
+        )
+    }
+
     #[test]
     fn native_engine_reports_ready() {
         let engine =
@@ -547,6 +587,113 @@ mod tests {
     }
 
     #[test]
+    fn unpack_accepts_the_packaged_engine_from_ci() {
+        let Some(package) = env::var_os("PPTCOLLECTOR_PORTABLE_TEST_ZIP") else {
+            return;
+        };
+        let folder = tempfile::tempdir().unwrap();
+        unpack(&fs::read(package).unwrap(), folder.path()).unwrap();
+        assert!(probe_engine(&folder.path().join(ENGINE)).is_ok());
+    }
+
+    #[test]
+    fn supervisor_reopens_previous_if_current_cannot_start() {
+        let folder = tempfile::tempdir().unwrap();
+        write_config(
+            &folder.path().join(VERSION_FILE),
+            &Selection {
+                current: "build-current".into(),
+                previous: Some("build-old".into()),
+            },
+        )
+        .unwrap();
+        let mut launches = 0;
+        supervise_session(folder.path(), "ready", |_, slot, mode, reason| {
+            launches += 1;
+            match launches {
+                1 => {
+                    assert_eq!(slot, "build-current");
+                    Err("current did not start".into())
+                }
+                2 => {
+                    assert_eq!(slot, "build-old");
+                    assert!(mode.starts_with("readonly:"));
+                    assert_eq!(reason, Some("current did not start"));
+                    Ok(fixture_child("exit 0"))
+                }
+                _ => panic!("Unexpected launch {slot}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(launches, 2);
+    }
+
+    #[test]
+    fn supervisor_continues_after_commit_and_rolls_back_failed_trials() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = folder.path().join(VERSION_FILE);
+        let pending = folder.path().join(PENDING);
+        let new_candidate = Candidate {
+            slot: "build-new".into(),
+            version: Version::new(0, 2, 5),
+        };
+        let bad_candidate = Candidate {
+            slot: "build-bad".into(),
+            version: Version::new(0, 2, 6),
+        };
+        write_config(
+            &state,
+            &Selection {
+                current: "build-old".into(),
+                previous: None,
+            },
+        )
+        .unwrap();
+        write_config(&pending, &bad_candidate).unwrap();
+
+        let mut launches = 0;
+        supervise_session(folder.path(), "ready", |_, slot, mode, reason| {
+            launches += 1;
+            assert!(!pending.exists());
+            match launches {
+                1 => {
+                    assert_eq!((slot, mode, reason), ("build-old", "ready", None));
+                    write_config(&pending, &new_candidate).unwrap();
+                    Ok(fixture_child("exit 75"))
+                }
+                2 => {
+                    assert_eq!((slot, mode, reason), ("build-new", "trial", None));
+                    write_config(&pending, &bad_candidate).unwrap();
+                    Ok(fixture_child(&fixture_reply(
+                        "PptCollector ready 0.2.5",
+                        UPDATE_EXIT,
+                    )))
+                }
+                3 => {
+                    assert_eq!((slot, mode, reason), ("build-bad", "trial", None));
+                    Ok(fixture_child("exit 1"))
+                }
+                4 => {
+                    assert_eq!((slot, mode), ("build-new", "ready"));
+                    assert_eq!(reason, Some("新版在準備完成前已關閉。"));
+                    Ok(fixture_child("exit 75"))
+                }
+                5 => {
+                    assert_eq!((slot, mode), ("build-new", "ready"));
+                    assert_eq!(reason, Some("找不到免安裝版的版本設定。"));
+                    Ok(fixture_child("exit 0"))
+                }
+                _ => panic!("Unexpected launch {slot}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(launches, 5);
+        let saved: Selection = read_config(&state).unwrap();
+        assert_eq!(saved.current, "build-new");
+        assert_eq!(saved.previous.as_deref(), Some("build-old"));
+    }
+
+    #[test]
     fn only_ready_trial_changes_the_current_slot() {
         let folder = tempfile::tempdir().unwrap();
         let state = folder.path().join(VERSION_FILE);
@@ -565,23 +712,8 @@ mod tests {
             ),
             (Some("PptCollector ready 0.2.5"), None),
         ] {
-            let command = reply.map_or_else(
-                || "exit 1".into(),
-                |reply| {
-                    format!(
-                        "[Console]::Out.Write(\"{reply}`n\"); \
-                     [Console]::Out.Flush(); \
-                     if ([Console]::OpenStandardInput().ReadByte() -ne 49) {{ exit 1 }}"
-                    )
-                },
-            );
-            let child = Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &command])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let command = reply.map_or_else(|| "exit 1".into(), |reply| fixture_reply(reply, 0));
+            let child = fixture_child(&command);
             let candidate = Candidate {
                 slot: "build-new".into(),
                 version: Version::new(0, 2, 5),

@@ -16,7 +16,7 @@
 
 開啟「版本與更新」可查看目前版號，並手動檢查有沒有新版。選擇「更新並重新開啟」前，可以先看從目前版本到新版的變更。重新開啟後需重新選擇資料夾和搜尋，已匯出的簡報保留在原處。
 
-Windows 10／11 x64 免安裝版可在有寫入權限的本機固定 NTFS 磁碟上自動更新。其它位置可從更新視窗下載新版。新版主程式和簡報處理元件都啟動成功後才切換；若試跑失敗，原版本會重新開啟。v0.2.4 或更早的免安裝版請先手動下載並解壓縮具備「版本與更新」的完整 ZIP。
+Windows 10／11 x64 免安裝版可在有寫入權限的本機固定 NTFS 磁碟上自動更新。其他位置可從更新視窗下載新版。新版主程式和簡報處理元件都啟動成功後才切換。若試跑失敗，原版本會重新開啟。若使用的免安裝版尚未提供「版本與更新」，請先手動下載新版的完整 ZIP 並解壓縮。
 
 ## 建置
 
@@ -36,7 +36,7 @@ App 使用 Rust + Tauri 管理視窗、搜尋和匯出。`engine/` 是隨 App �
 
 預設建置不啟用線上更新。用 Tauri 建置覆寫設定指定版號、固定 HTTPS 測試清單網址和測試公鑰（`plugins.updater.endpoints`、`plugins.updater.pubkey`）。每個更新檔必須用對應金鑰及該檔案內嵌的版號簽章。Windows 安裝版和 macOS 可用 Tauri 的 `bundle.createUpdaterArtifacts: true` 產生更新檔與簽章。啟用 macOS 發行更新前，須完成簽署、公證和實際升級驗證。
 
-Windows x64 建置後用 Python 3 執行 `python scripts/package-portable.py --version <建置版號> --out artifacts`。把 `-portable.zip` 提供給手動下載，並用 `npm exec tauri -- signer sign --private-key-path <測試金鑰檔> --app-version <建置版號> <檔案路徑>` 簽署 `-portable-update.zip`。
+Windows x64 建置後用 Python 3 執行 `python scripts/package-portable.py --version <建置版號> --out artifacts`。用 `npm exec tauri -- signer sign --private-key-path <測試金鑰檔> --app-version <建置版號> <檔案路徑>` 簽署 `-portable-update.zip`。將完整的 `-portable.zip` 放在同一網址目錄，供手動下載。
 
 清單採 Tauri 靜態格式，包含 `version`、`notes` 和 `platforms`。支援平台鍵為 `windows-x86_64-nsis`（`-setup.exe`）、`windows-x86_64-portable`（`-portable-update.zip`）及 `darwin-aarch64`（`.app.tar.gz`），各自帶入 `url` 和 `.sig` 檔案的 `signature` 文字。另加 `changes` 陣列，每筆含 `version` 和純文字 `notes`，保留先前發行紀錄供跨版本更新顯示。測試與正式環境各用自己的網址與金鑰。
 

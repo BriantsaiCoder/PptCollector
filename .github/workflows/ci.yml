@@ -56,8 +56,6 @@ jobs:
         run: |
           npm ci
           npm run build -- --ci --bundles ${{ matrix.bundle }} -- --locked
-      - name: Verify updater behavior
-        run: cargo +stable test --locked --bin ppt-collector
       - name: Check bundle and run the native engine
         shell: pwsh
         run: |
@@ -70,6 +68,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed.' }
             python -m zipfile -t "target/portable/PptCollector-v$version-windows-x64-portable.zip"
             if ($LASTEXITCODE -ne 0) { throw 'Portable ZIP verification failed.' }
+            "PPTCOLLECTOR_PORTABLE_TEST_ZIP=target/portable/PptCollector-v$version-windows-x64-portable-update.zip" >> $env:GITHUB_ENV
           } else {
             $engine = './target/release/bundle/macos/PptCollector.app/Contents/Resources/engine/PptCollector.Engine'
           }
@@ -77,3 +76,5 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or ($reply | ConvertFrom-Json).error -ne '不支援的操作。') {
             throw "Engine smoke check failed: $engine"
           }
+      - name: Verify updater behavior
+        run: cargo +stable test --locked --bin ppt-collector

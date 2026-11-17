@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Duration};
 #[cfg(windows)]
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
 
 const RELEASES: &str = "https://github.com/BriantsaiCoder/PptCollector/releases";
 
@@ -30,26 +30,31 @@ pub(crate) struct UpdateOffer {
     version: String,
     can_install: bool,
     portable_download: bool,
+    manual_reason: Option<String>,
     changes: Vec<Change>,
 }
 
 fn changes(current: &Version, latest: &Version, update: &Update) -> Vec<Change> {
-    let history = update
-        .raw_json
-        .get("changes")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
-    select_changes(current, latest, history, update.body.as_deref())
+    select_changes(
+        current,
+        latest,
+        update.raw_json.get("changes"),
+        update.body.as_deref(),
+    )
 }
 
 fn select_changes(
     current: &Version,
     latest: &Version,
-    history: Vec<Change>,
+    history: Option<&serde_json::Value>,
     latest_notes: Option<&str>,
 ) -> Vec<Change> {
     let mut by_version = BTreeMap::new();
+    let history = history
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<Change>(value.clone()).ok());
     for change in history {
         let Ok(version) = Version::parse(change.version.trim_start_matches('v')) else {
             continue;
@@ -112,7 +117,8 @@ pub(crate) async fn update_info(app: AppHandle) -> Result<UpdateInfo> {
 
 fn is_portable() -> bool {
     #[cfg(windows)]
-    return crate::portable::runtime_root().is_some();
+    return crate::portable::runtime_root().is_some()
+        || !std::env::current_exe().is_ok_and(|exe| exe.with_file_name("uninstall.exe").is_file());
     #[cfg(not(windows))]
     false
 }
@@ -143,7 +149,14 @@ pub(crate) async fn check_update(
     }
 
     #[allow(unused_mut)]
-    let mut builder = app.updater_builder().timeout(Duration::from_secs(15));
+    let mut builder = app
+        .updater_builder()
+        .timeout(Duration::from_secs(15))
+        .configure_client(|client| {
+            client
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(45))
+        });
     #[cfg(windows)]
     {
         builder = builder.target(if is_portable() {
@@ -152,18 +165,22 @@ pub(crate) async fn check_update(
             "windows-x86_64-nsis"
         });
     }
-    let updater = builder.build().map_err(|_| "無法啟用版本查詢。")?;
-    let Some(update) = updater
-        .check()
-        .await
-        .map_err(|_| "目前無法查詢新版，請確認網路連線後再試。")?
+    let updater = builder
+        .build()
+        .map_err(|error| format!("無法啟用版本查詢。原因：{}", updater_reason(error)))?;
+    let Some(update) = updater.check().await.map_err(|error| {
+        format!(
+            "目前無法查詢新版，請稍後再試。原因：{}",
+            updater_reason(error)
+        )
+    })?
     else {
         return Ok(None);
     };
     // Bind the offer to these exact manifest bytes and enforce signed version on every path.
     let mut update = updater
         .restore_update(update.raw_json)
-        .map_err(|_| "更新資料格式有誤。")?
+        .map_err(|error| format!("更新資料格式有誤。原因：{}", updater_reason(error)))?
         .ok_or("更新資料已變更，請重新檢查。")?;
     let latest = Version::parse(&update.version).map_err(|_| "更新版號格式有誤。")?;
     if update.download_url.scheme() != "https"
@@ -187,9 +204,17 @@ pub(crate) async fn check_update(
         version: update.version.clone(),
         can_install: installable,
         portable_download: is_portable() && !installable,
+        manual_reason: {
+            #[cfg(windows)]
+            {
+                (is_portable() && !installable).then(crate::portable::manual_reason)
+            }
+            #[cfg(not(windows))]
+            None
+        },
         changes: changes(&app.package_info().version, &latest, &update),
     };
-    update.timeout = Some(Duration::from_secs(300));
+    update.timeout = Some(Duration::from_secs(900));
     state.0.lock().unwrap().replace(update);
     Ok(Some(offer))
 }
@@ -249,36 +274,83 @@ pub(crate) async fn install_update(
             },
         )
         .await
-        .map_err(|_| "下載或驗證更新失敗，請重新檢查後再試。")?;
+        .map_err(|error| {
+            format!(
+                "下載或驗證更新失敗，請重新檢查後再試。原因：{}",
+                updater_reason(error)
+            )
+        })?;
 
     #[cfg(windows)]
     if is_portable() {
         tauri::async_runtime::spawn_blocking(move || crate::portable::stage(&version, &bytes))
             .await
-            .map_err(|_| "無法準備新版，請再試一次。")??;
+            .map_err(|error| format!("無法準備新版，請再試一次。原因：{error}"))??;
         app.exit(crate::portable::UPDATE_EXIT);
         return Ok(());
     }
 
     tauri::async_runtime::spawn_blocking(move || update.install(bytes))
         .await
-        .map_err(|_| "無法安裝新版，請再試一次。")?
-        .map_err(|_| "無法安裝新版，請確認安裝位置的權限或從發行頁下載。")?;
+        .map_err(|error| format!("無法安裝新版，請再試一次。原因：{error}"))?
+        .map_err(install_error)?;
     #[cfg(target_os = "macos")]
     app.restart();
     #[allow(unreachable_code)]
     Ok(())
 }
 
+fn updater_reason(error: UpdaterError) -> String {
+    match error {
+        UpdaterError::Reqwest(error) if error.is_timeout() => "等候更新伺服器回應逾時。".into(),
+        UpdaterError::Reqwest(error) if error.is_connect() => {
+            "無法連線到更新伺服器，請確認網路連線。".into()
+        }
+        UpdaterError::Reqwest(error) => error.without_url().to_string(),
+        UpdaterError::Serialization(_) => "更新資料格式有誤。".into(),
+        UpdaterError::SignatureUtf8(_) => "更新簽章編碼不正確。".into(),
+        error => error.to_string(),
+    }
+}
+
+fn install_error(error: UpdaterError) -> String {
+    match error {
+        tauri_plugin_updater::Error::PreviousAppNotRestored(path) => {
+            let path = crate::core::display_path(&path);
+            format!(
+                "更新失敗，舊版備份仍在「{path}」。請將備份移回原安裝位置並命名為 PptCollector.app，或從發行頁重新下載。"
+            )
+        }
+        error => format!(
+            "無法安裝新版，可從發行頁重新下載。原因：{}",
+            updater_reason(error)
+        ),
+    }
+}
+
 #[tauri::command]
-pub(crate) async fn open_update_release(version: Option<String>) -> Result<()> {
+pub(crate) async fn open_update_release(
+    version: Option<String>,
+    state: State<'_, UpdateState>,
+) -> Result<()> {
     let url = match version {
         Some(version) => {
             let version = Version::parse(&version).map_err(|_| "更新版號格式有誤。")?;
             if is_portable() && !can_install() {
-                format!(
-                    "{RELEASES}/download/v{version}/PptCollector-v{version}-windows-x64-portable.zip"
-                )
+                let mut url = state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|update| update.version == version.to_string())
+                    .map(|update| update.download_url.clone())
+                    .ok_or("請重新檢查更新。")?;
+                let prefix = url
+                    .path()
+                    .strip_suffix("-portable-update.zip")
+                    .ok_or("找不到免安裝版的下載網址。")?;
+                url.set_path(&format!("{prefix}-portable.zip"));
+                url.to_string()
             } else {
                 format!("{RELEASES}/tag/v{version}")
             }
@@ -295,8 +367,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn install_error_shows_where_to_retrieve_the_previous_app() {
+        let backup = Path::new("/Applications/PptCollector (previous version).app");
+        let message = install_error(tauri_plugin_updater::Error::PreviousAppNotRestored(
+            backup.to_path_buf(),
+        ));
+        assert!(message.contains(backup.to_str().unwrap()));
+        assert!(message.contains("移回原安裝位置"));
+    }
+
+    #[test]
+    fn malformed_update_url_does_not_show_its_query() {
+        let input = serde_json::json!("https://example.invalid:bad/file?token=fixture-only");
+        let error = serde_json::from_value::<tauri::Url>(input).unwrap_err();
+        assert!(error.to_string().contains("fixture-only"));
+        assert_eq!(
+            updater_reason(UpdaterError::Serialization(error)),
+            "更新資料格式有誤。"
+        );
+    }
+
+    #[test]
     fn history_shows_only_versions_skipped_in_descending_order() {
-        let history = [
+        let mut history = [
             ("v0.2.4", "installed"),
             ("0.2.9", "outside"),
             ("0.2.10", "outside"),
@@ -306,14 +399,13 @@ mod tests {
             ("0.2.8", " "),
             ("invalid", "invalid"),
         ]
-        .map(|(version, notes)| Change {
-            version: version.into(),
-            notes: notes.into(),
-        });
+        .map(|(version, notes)| serde_json::json!({ "version": version, "notes": notes }))
+        .to_vec();
+        history.push(serde_json::json!({ "version": "0.2.7", "notes": null }));
         let rows = select_changes(
             &Version::new(0, 2, 4),
             &Version::new(0, 2, 8),
-            history.into(),
+            Some(&serde_json::Value::Array(history)),
             Some("latest"),
         );
         assert_eq!(

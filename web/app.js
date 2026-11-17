@@ -453,7 +453,7 @@ updateCheck.addEventListener("click", async () => {
     updateOffer = await invoke("check_update");
     showUpdateOffer(updateOffer);
     updateStatus.textContent = updateOffer
-      ? `有新版本 v${updateOffer.version}。${updateOffer.can_install ? "" : "這個位置無法自動更新，可手動下載新版。"}`
+      ? `有新版本 v${updateOffer.version}。${updateOffer.can_install ? "" : updateOffer.manual_reason || "這個位置無法自動更新，可手動下載新版。"}`
       : "目前已是最新版。";
     if (updateOffer?.can_install && state.phase) updateStatus.textContent += " 請等目前工作完成再更新。";
   } catch (error) {
