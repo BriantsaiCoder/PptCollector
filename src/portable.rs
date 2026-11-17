@@ -68,7 +68,8 @@ pub(crate) fn can_stage() -> bool {
         && env::var(MODE)
             .as_deref()
             .is_ok_and(|mode| matches!(mode, "ready" | "trial"))
-        && runtime_root().is_some_and(|root| fixed_ntfs(&root))
+        && runtime_root()
+            .is_some_and(|root| fixed_ntfs(&root) && plain_directory(&root.join("versions")))
 }
 
 pub(crate) fn manual_reason() -> String {
@@ -93,7 +94,7 @@ pub(crate) fn run_launcher() -> bool {
 
 fn supervise(root: &Path) -> Result<()> {
     // Hold an exclusive Windows file handle for the entire app/launcher lifetime.
-    let (lock, mode) = if fixed_ntfs(root) {
+    let (lock, mode) = if fixed_ntfs(root) && plain_directory(&root.join("versions")) {
         match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -113,7 +114,7 @@ fn supervise(root: &Path) -> Result<()> {
     } else {
         (
             None,
-            "readonly:自動更新需要本機固定 NTFS 磁碟，可手動下載新版。".into(),
+            "readonly:這個位置不支援自動更新，可手動下載新版。".into(),
         )
     };
     let result = supervise_session(root, &mode, launch);
@@ -327,7 +328,7 @@ pub(crate) fn stage(version: &str, bytes: &[u8]) -> Result<()> {
         .ok_or("這個位置無法自動更新。")?;
     let version = Version::parse(version).map_err(|_| "更新版號格式有誤。")?;
     let versions = root.join("versions");
-    if !regular(&versions, true) {
+    if !plain_directory(&versions) {
         return Err("找不到免安裝版的版本資料夾。".into());
     }
     let folder = tempfile::Builder::new()
@@ -418,14 +419,20 @@ fn safe_filename(name: &str) -> bool {
 }
 
 fn regular(path: &Path, directory: bool) -> bool {
+    // Windows FileType excludes symlinks and junctions from is_dir/is_file.
+    // Cloud placeholders can still represent an ordinary file or directory.
     fs::symlink_metadata(path).is_ok_and(|metadata| {
-        metadata.file_attributes() & REPARSE_POINT == 0
-            && if directory {
-                metadata.is_dir()
-            } else {
-                metadata.is_file()
-            }
+        if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        }
     })
+}
+
+fn plain_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.file_attributes() & REPARSE_POINT == 0)
 }
 
 fn slot_path(root: &Path, slot: &str) -> Result<PathBuf> {
@@ -482,7 +489,7 @@ fn fixed_ntfs(root: &Path) -> bool {
             filesystem_length: u32,
         ) -> i32;
     }
-    if !regular(root, true) {
+    if !plain_directory(root) {
         return false;
     }
     let Ok(root) = root.canonicalize() else {
@@ -592,8 +599,38 @@ mod tests {
             return;
         };
         let folder = tempfile::tempdir().unwrap();
-        unpack(&fs::read(package).unwrap(), folder.path()).unwrap();
-        assert!(probe_engine(&folder.path().join(ENGINE)).is_ok());
+        assert!(fixed_ntfs(folder.path()));
+        let versions = folder.path().join("versions");
+        fs::create_dir(&versions).unwrap();
+        let slot = tempfile::Builder::new()
+            .prefix("build-")
+            .tempdir_in(&versions)
+            .unwrap();
+        unpack(&fs::read(package).unwrap(), slot.path()).unwrap();
+        let name = slot.path().file_name().unwrap().to_str().unwrap();
+        let selected = slot_path(folder.path(), name).unwrap();
+        assert!(probe_engine(&selected.join(ENGINE)).is_ok());
+    }
+
+    #[test]
+    fn read_and_stage_reject_junctions() {
+        let folder = tempfile::tempdir().unwrap();
+        if !fixed_ntfs(folder.path()) {
+            return;
+        }
+        let target = folder.path().join("target");
+        let junction = folder.path().join("junction");
+        fs::create_dir(&target).unwrap();
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(junction.is_dir());
+        assert!(!regular(&junction, true));
+        assert!(!plain_directory(&junction));
     }
 
     #[test]
