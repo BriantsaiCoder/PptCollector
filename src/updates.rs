@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Duration};
 #[cfg(windows)]
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
+use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterBuilder, UpdaterExt};
 
 const RELEASES: &str = "https://github.com/BriantsaiCoder/PptCollector/releases";
 
@@ -125,9 +125,22 @@ fn is_portable() -> bool {
 
 fn can_install() -> bool {
     #[cfg(windows)]
-    return !is_portable() || crate::portable::can_stage();
+    return cfg!(target_arch = "x86_64") && (!is_portable() || crate::portable::can_stage());
     #[cfg(not(windows))]
     cfg!(target_os = "macos")
+}
+
+fn configure_updater(builder: UpdaterBuilder) -> UpdaterBuilder {
+    builder
+        .timeout(Duration::from_secs(15))
+        .configure_client(|client| {
+            client
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(45))
+        })
+        // The Windows hook runs before ShellExecute. Keep the app usable if opening the
+        // installer fails. When it does start, the plugin exits the process immediately.
+        .on_before_exit(|| {})
 }
 
 #[tauri::command]
@@ -149,14 +162,7 @@ pub(crate) async fn check_update(
     }
 
     #[allow(unused_mut)]
-    let mut builder = app
-        .updater_builder()
-        .timeout(Duration::from_secs(15))
-        .configure_client(|client| {
-            client
-                .connect_timeout(Duration::from_secs(10))
-                .read_timeout(Duration::from_secs(45))
-        });
+    let mut builder = configure_updater(app.updater_builder());
     #[cfg(windows)]
     {
         builder = builder.target(if is_portable() {
@@ -418,20 +424,23 @@ mod tests {
     #[test]
     fn signed_release_rejects_modified_bytes_and_relabeling() {
         // Public key and signature from a disposable key generated for this fixture.
-        let public_key = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDQUVGNTE2N0ZDMzBCMDQKUldRRUM4Ti9Gdld1UEtlOVBQZXhuR3FwTEhZN090Q3VkWVFCZU44cFVobkRSb1Jjc21odWVQRCsK";
-        let signature = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRRUM4Ti9Gdld1UEJnR3ZuY2MwOE1LMUpUZXdZY1RyMW5BTGl1SWthT1hSV29VekdoV2xJNkYzWHlXYWlpQWdLKzF4K2NCdXFGdVI4c3YxL1VZc0xCN0lhdWlvSTl1OHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODk1NDc4CWZpbGU6cGF5bG9hZAl2ZXJzaW9uOjIuMC4wClFZcWYrL0pWMU1EekE3MUNZdzRtbnZhQTMyU0VKTUZXSWNLVWRCZWRFVUxDbE1OMU5TMnVVKzMybDNySlBaMkNTZGRPcmZsUlFZOE1PS2ZEVXZiT0JnPT0K";
+        let public_key = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzODNFNjQ2QUMyNEYxRUYKUldUdjhTU3NSdWFEc3pvcXAwSWxRMlVhZ2NadUxOT3pWb042eUl2aGM5bWNNVDU0Z1dkL054VHoK";
+        let signature = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUdjhTU3NSdWFEc3dUWUFQVjFkV0VDVnZSWStJbVVRRXhBTDFOeklCRFYxWWhpamJRZlhQNzBhVUJ5V2NnR0dnZkxrOHg3OUovUHFwakYrc1h4SE5JcHlNcnZaYmh3dndnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTAxMjIxCWZpbGU6cGF5bG9hZAl2ZXJzaW9uOjIuMC4wCnE2RGp1eXZzRlNmYUppUUJOZlA0VkJKNGNtQXYwZnpoTEtYRnB1bzVPUnZpZGxpc0hyaDdmSldLZ3VNcFQ3M1VYRDcwY09tbkZhdUd2blgxR213NkR3PT0K";
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
-        context.config_mut().plugins.0.insert(
-            "updater".into(),
-            serde_json::json!({ "pubkey": public_key }),
-        );
+        let shipped: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mut config = shipped["plugins"]["updater"].clone();
+        config["pubkey"] = serde_json::json!(public_key);
+        context
+            .config_mut()
+            .plugins
+            .0
+            .insert("updater".into(), config);
         let app = tauri::test::mock_builder()
             .plugin(tauri_plugin_updater::Builder::new().build())
             .build(context)
             .unwrap();
-        let updater = app
-            .handle()
-            .updater_builder()
+        let updater = configure_updater(app.handle().updater_builder())
             .target("fixture")
             .endpoints(vec![
                 "https://example.invalid/updates.json".parse().unwrap(),
@@ -448,7 +457,8 @@ mod tests {
                 }
             }
         });
-        let payload = b"PptCollector updater fixture";
+        // MZ makes the updater reach the Windows launcher, but this fixture is not executable.
+        let payload = b"MZPptCollector updater fixture";
         let signed = updater.restore_update(manifest.clone()).unwrap().unwrap();
         assert!(signed.verify(payload).is_ok());
         assert!(signed.verify(b"tampered fixture").is_err());
@@ -459,5 +469,16 @@ mod tests {
             relabeled.verify(payload),
             Err(tauri_plugin_updater::Error::SignedVersionMismatch { .. })
         ));
+
+        #[cfg(windows)]
+        {
+            struct TestResource;
+            impl tauri::Resource for TestResource {}
+
+            let id = app.resources_table().add(TestResource);
+            let error = signed.install(payload).unwrap_err();
+            assert!(matches!(error, UpdaterError::Io(_)), "{error:?}");
+            assert!(app.resources_table().get::<TestResource>(id).is_ok());
+        }
     }
 }

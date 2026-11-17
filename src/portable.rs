@@ -18,6 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+// The launcher stays at its bootstrap release. Keep these names, the state and candidate
+// JSON, and the exit/ready/ack exchange compatible with shipped launchers. A breaking
+// change requires a new full ZIP.
 const APP: &str = "ppt-collector.exe";
 const ENGINE: &str = "engine/PptCollector.Engine.exe";
 const VERSION_FILE: &str = "portable-state.json";
@@ -596,6 +599,10 @@ mod tests {
     #[test]
     fn unpack_accepts_the_packaged_engine_from_ci() {
         let Some(package) = env::var_os("PPTCOLLECTOR_PORTABLE_TEST_ZIP") else {
+            assert!(
+                env::var_os("GITHUB_ACTIONS").is_none(),
+                "CI must provide the update ZIP"
+            );
             return;
         };
         let folder = tempfile::tempdir().unwrap();
@@ -613,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn read_and_stage_reject_junctions() {
+    fn regular_and_plain_directory_reject_junctions() {
         let folder = tempfile::tempdir().unwrap();
         if !fixed_ntfs(folder.path()) {
             return;
@@ -631,6 +638,29 @@ mod tests {
         assert!(junction.is_dir());
         assert!(!regular(&junction, true));
         assert!(!plain_directory(&junction));
+    }
+
+    #[test]
+    fn portable_launchers_can_read_the_bootstrap_protocol() {
+        assert_eq!(APP, "ppt-collector.exe");
+        assert_eq!(ENGINE, "engine/PptCollector.Engine.exe");
+        assert_eq!(MODE, "PPTCOLLECTOR_PORTABLE");
+        assert_eq!(RESTORED, "PPTCOLLECTOR_PORTABLE_RESTORED");
+        assert_eq!(UPDATE_EXIT, 75);
+        assert_eq!(ready_message("1.2.3"), "PptCollector ready 1.2.3\n");
+
+        let json = r#"{"current":"build-old","previous":null}"#;
+        let selection: Selection = serde_json::from_str(json).unwrap();
+        assert_eq!(selection.current, "build-old");
+        assert!(selection.previous.is_none());
+        let candidate = Candidate {
+            slot: "build-new".into(),
+            version: Version::new(1, 2, 3),
+        };
+        assert_eq!(
+            serde_json::to_value(candidate).unwrap(),
+            serde_json::json!({"slot": "build-new", "version": "1.2.3"})
+        );
     }
 
     #[test]
