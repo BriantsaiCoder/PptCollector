@@ -56,6 +56,8 @@ jobs:
         run: |
           npm ci
           npm run build -- --ci --bundles ${{ matrix.bundle }} -- --locked
+      - name: Verify updater behavior
+        run: cargo +stable test --locked --bin ppt-collector
       - name: Check bundle and run the native engine
         shell: pwsh
         run: |
@@ -63,6 +65,11 @@ jobs:
             $installer = Get-ChildItem 'target/release/bundle/nsis/*-setup.exe' -File -ErrorAction Stop
             if (@($installer).Count -ne 1) { throw 'Expected one Windows installer.' }
             $engine = './engine/publish/PptCollector.Engine.exe'
+            $version = (Get-Content tauri.conf.json -Raw | ConvertFrom-Json).version
+            python scripts/package-portable.py --version $version --out target/portable
+            if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed.' }
+            python -m zipfile -t "target/portable/PptCollector-v$version-windows-x64-portable.zip"
+            if ($LASTEXITCODE -ne 0) { throw 'Portable ZIP verification failed.' }
           } else {
             $engine = './target/release/bundle/macos/PptCollector.app/Contents/Resources/engine/PptCollector.Engine'
           }

@@ -26,6 +26,14 @@
       }]
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [],
+      "pubkey": "",
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
     "resources": { "engine/publish/": "engine/" },
