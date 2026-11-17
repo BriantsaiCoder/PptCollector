@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod core;
+#[cfg(windows)]
+mod portable;
+mod updates;
 
 use crate::core::{ExportOptions, Exported, Hit, Job, Result, Scan, display_path};
 use serde::Serialize;
@@ -318,17 +321,37 @@ async fn open_output_folder(app: AppHandle) -> Result<()> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if portable::run_launcher() {
+        return;
+    }
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    if portable::is_trial() {
+        context.config_mut().app.windows[0].visible = false;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .default_version_comparator(|current, release| release.version > current)
+                .build(),
+        )
         .manage(AppState::default())
+        .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             search,
             cancel_scan,
             export,
             open_source,
-            open_output_folder
+            open_output_folder,
+            updates::update_info,
+            updates::check_update,
+            updates::install_update,
+            updates::open_update_release,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("PptCollector failed to start");
 }

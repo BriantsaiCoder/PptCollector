@@ -47,6 +47,23 @@ h2 { font-size: 17px; line-height: 1.4; }
   width: 11px; height: 2px; background: var(--blue); border-radius: 2px;
 }
 .format { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+#update-dialog {
+  width: min(480px, calc(100% - 32px)); max-height: calc(100% - 32px);
+  border: 1px solid var(--line); border-radius: 14px; padding: 20px;
+  color: var(--text); background: var(--surface);
+}
+#update-dialog::backdrop { background: #15243e66; }
+#update-dialog > :not(:first-child) { margin-top: 12px; }
+#update-status:empty { display: none; }
+#update-progress { width: 100%; }
+#update-changes {
+  max-height: min(220px, 35vh); overflow: auto; padding: 12px;
+  background: var(--background); border-radius: 8px;
+}
+#update-changes h3 { font-size: 14px; margin: 0 0 4px; }
+#update-changes article + article { margin-top: 12px; }
+#update-changes p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.update-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .usage-tips {
   display: flex; flex-wrap: wrap; gap: 3px 24px; font-size: 13px; line-height: 1.5;
   padding: 9px clamp(18px, 3vw, 40px); background: var(--tint); border-bottom: 1px solid var(--line);
@@ -209,7 +226,7 @@ td input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue)
 }
 @media (max-width: 430px) {
   .format { display: none; }
-  #tips-toggle { margin-left: auto; }
+  #update-open { margin-left: auto; }
   .workspace { padding-inline: 12px; }
   .results-head, .settings { padding: 14px; }
   .export-bar form { grid-template-columns: minmax(0, 1fr); }

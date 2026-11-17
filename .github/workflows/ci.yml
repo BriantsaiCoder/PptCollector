@@ -63,6 +63,12 @@ jobs:
             $installer = Get-ChildItem 'target/release/bundle/nsis/*-setup.exe' -File -ErrorAction Stop
             if (@($installer).Count -ne 1) { throw 'Expected one Windows installer.' }
             $engine = './engine/publish/PptCollector.Engine.exe'
+            $version = (Get-Content tauri.conf.json -Raw | ConvertFrom-Json).version
+            python scripts/package-portable.py --version $version --out target/portable
+            if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed.' }
+            python -m zipfile -t "target/portable/PptCollector-v$version-windows-x64-portable.zip"
+            if ($LASTEXITCODE -ne 0) { throw 'Portable ZIP verification failed.' }
+            "PPTCOLLECTOR_PORTABLE_TEST_ZIP=target/portable/PptCollector-v$version-windows-x64-portable-update.zip" >> $env:GITHUB_ENV
           } else {
             $engine = './target/release/bundle/macos/PptCollector.app/Contents/Resources/engine/PptCollector.Engine'
           }
@@ -70,3 +76,5 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or ($reply | ConvertFrom-Json).error -ne '不支援的操作。') {
             throw "Engine smoke check failed: $engine"
           }
+      - name: Verify updater behavior
+        run: cargo +stable test --locked --bin ppt-collector

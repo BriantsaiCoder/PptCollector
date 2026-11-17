@@ -11,6 +11,14 @@ tauri-build = { version = "2.7.4", features = [] }
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+semver = { version = "1.0.28", features = ["serde"] }
 tauri = { version = "2.12.5", features = ["custom-protocol"] }
 tauri-plugin-dialog = "2.8.4"
+tauri-plugin-updater = "=2.14.1"
 tempfile = "3.27.0"
+
+[dev-dependencies]
+tauri = { version = "2.12.5", features = ["test"] }
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "9.6.1", default-features = false, features = ["deflate"] }

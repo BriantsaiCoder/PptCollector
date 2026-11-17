@@ -16,6 +16,7 @@
         <p>投影片搜尋與合併</p>
       </div>
       <span class="format">PowerPoint · .pptx</span>
+      <button id="update-open" type="button" class="secondary" aria-haspopup="dialog">版本與更新</button>
       <button id="tips-toggle" type="button" class="secondary" aria-controls="usage-tips" aria-expanded="false">使用提示</button>
     </div>
     <section id="usage-tips" class="usage-tips" aria-label="使用提示" hidden>
@@ -110,6 +111,20 @@
       <p id="output-path" class="hint" tabindex="0">存回所選資料夾</p>
     </form>
   </section>
+  <dialog id="update-dialog" aria-labelledby="update-title">
+    <h2 id="update-title">版本與更新</h2>
+    <p class="hint" id="update-version">正在讀取目前版本…</p>
+    <p id="update-status" role="status"></p>
+    <progress id="update-progress" aria-label="更新下載進度" hidden></progress>
+    <section id="update-changes" aria-label="本次更新內容" hidden></section>
+    <p class="hint" id="update-restart" hidden>重新開啟後，本次搜尋結果與勾選會清除。已匯出的簡報會保留。</p>
+    <div class="update-actions">
+      <button id="update-release" class="secondary" type="button">開啟發行頁</button>
+      <button id="update-close" class="secondary" type="button" autofocus>關閉</button>
+      <button id="update-check" class="primary" type="button">檢查更新</button>
+      <button id="update-install" class="primary" type="button" hidden>更新並重新開啟</button>
+    </div>
+  </dialog>
   <div id="source-menu" role="menu" aria-label="來源簡報操作" hidden>
     <button type="button" role="menuitem" tabindex="-1">開啟檔案</button>
     <button type="button" role="menuitem" tabindex="-1">開啟所在資料夾</button>

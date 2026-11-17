@@ -58,6 +58,7 @@ function updateButtons() {
   byId("open").disabled = busy;
   byId("export").disabled = busy || !state.selected.size || !stem();
   byId("export").textContent = state.phase === "export" ? "匯出中…" : "匯出 .pptx";
+  byId("update-install").disabled = busy;
   const checks = byId("rows").querySelectorAll("input[type=checkbox]");
   for (const check of checks) check.disabled = busy;
   byId("previous").disabled = busy || state.page === 0;
@@ -380,8 +381,6 @@ if (bridge) {
     byId("progress-label").textContent = `已掃描 ${done} / ${total} 份 · ${hits} 張符合`;
   }).catch(error => notify(errorText(error), "error"));
 }
-updateButtons();
-
 const tips = byId("usage-tips");
 const tipsToggle = byId("tips-toggle");
 const tipsDismissedKey = "pptcollector-guide-seen";
@@ -404,3 +403,124 @@ tipsToggle.addEventListener("click", () => {
     catch { /* Dismissal still applies to the current session. */ }
   }
 });
+
+const updateDialog = byId("update-dialog");
+const updateStatus = byId("update-status");
+const updateCheck = byId("update-check");
+const updateInstall = byId("update-install");
+const updateRelease = byId("update-release");
+const updateProgress = byId("update-progress");
+let updateOffer = null;
+
+byId("update-open").addEventListener("click", () => updateDialog.showModal());
+byId("update-close").addEventListener("click", () => updateDialog.close());
+updateDialog.addEventListener("close", () => byId("update-open").focus());
+updateDialog.addEventListener("cancel", event => {
+  if (state.phase === "update") event.preventDefault();
+});
+updateRelease.addEventListener("click", async () => {
+  try {
+    await invoke("open_update_release", { version: updateOffer?.version ?? null });
+  } catch (error) {
+    updateStatus.textContent = errorText(error);
+  }
+});
+
+function showUpdateOffer(offer) {
+  const changes = byId("update-changes");
+  changes.replaceChildren();
+  changes.hidden = !offer;
+  updateInstall.hidden = !offer?.can_install;
+  updateRelease.textContent = offer?.portable_download ? "下載免安裝版" : "開啟發行頁";
+  byId("update-restart").hidden = !offer?.can_install;
+  if (!offer) return;
+
+  for (const release of offer.changes) {
+    const item = document.createElement("article");
+    addText(item, "h3", `v${release.version}`);
+    addText(item, "p", release.notes);
+    changes.append(item);
+  }
+  if (!offer.changes.length) addText(changes, "p", "這版尚未提供功能變更說明，可到發行頁查看。");
+}
+
+updateCheck.addEventListener("click", async () => {
+  updateCheck.disabled = true;
+  updateOffer = null;
+  showUpdateOffer(null);
+  updateStatus.textContent = "正在檢查更新…";
+  try {
+    updateOffer = await invoke("check_update");
+    showUpdateOffer(updateOffer);
+    updateStatus.textContent = updateOffer
+      ? `有新版本 v${updateOffer.version}。${updateOffer.can_install ? "" : updateOffer.manual_reason || "這個位置無法自動更新，可手動下載新版。"}`
+      : "目前已是最新版。";
+    if (updateOffer?.can_install && state.phase) updateStatus.textContent += " 請等目前工作完成再更新。";
+  } catch (error) {
+    updateStatus.textContent = errorText(error);
+  } finally {
+    updateCheck.disabled = false;
+  }
+});
+
+updateInstall.addEventListener("click", async () => {
+  if (state.phase || !updateOffer?.can_install) return;
+  state.phase = "update";
+  updateButtons();
+  updateCheck.disabled = true;
+  updateRelease.disabled = true;
+  byId("update-close").disabled = true;
+  updateProgress.hidden = false;
+  updateProgress.removeAttribute("value");
+  updateStatus.textContent = "正在下載更新…";
+  try {
+    await invoke("install_update", { version: updateOffer.version });
+  } catch (error) {
+    updateOffer = null;
+    showUpdateOffer(null);
+    updateStatus.textContent = errorText(error);
+    updateProgress.hidden = true;
+    state.phase = "";
+    updateButtons();
+    updateCheck.disabled = false;
+    updateRelease.disabled = false;
+    byId("update-close").disabled = false;
+    updateCheck.focus();
+  }
+});
+
+async function initializeUpdates() {
+  if (!bridge) {
+    byId("update-version").textContent = "請在 PptCollector 裡查看版號。";
+    updateButtons();
+    return;
+  }
+  state.phase = "startup";
+  updateButtons();
+  try {
+    await bridge.event.listen("update-progress", ({ payload }) => {
+      if (state.phase !== "update") return;
+      if (payload.installing) {
+        updateStatus.textContent = "正在驗證並套用更新…";
+        updateProgress.removeAttribute("value");
+      } else if (payload.total) {
+        updateProgress.max = payload.total;
+        updateProgress.value = Math.min(payload.done, payload.total);
+      }
+    });
+  } catch (error) {
+    console.error("Update progress listener:", error);
+  }
+  try {
+    const info = await invoke("update_info");
+    byId("update-version").textContent = `目前版本 v${info.version}${info.portable ? " · 免安裝版" : ""}`;
+    if (info.message) notify(info.message);
+  } catch (error) {
+    byId("update-version").textContent = errorText(error);
+  } finally {
+    state.phase = "";
+    updateButtons();
+  }
+}
+
+initializeUpdates();
